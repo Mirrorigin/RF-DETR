@@ -11,6 +11,7 @@ from pycocotools.cocoeval import COCOeval
 
 BEST_WEIGHTS = "/home/jingmliang/Projects/RF-DETR/src/rfdetr/best_models/checkpoint_bigvision.pth"
 TEST_DIR     = "/home/jingmliang/Downloads/Intellisee master dataset.v156-rf-detr-v1.74.coco/test"
+# TEST_DIR     = "/Shared/nas4321/projects/intellisee/Master_1.71/test"
 ANN_PATH     = os.path.join(TEST_DIR, "_annotations.coco.json")
 BATCH_SIZE   = 8
 CONF_THRESHOLD = 0.001

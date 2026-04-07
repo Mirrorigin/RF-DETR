@@ -203,3 +203,9 @@ notebooks/*.py
 
 # tracking work in progress
 tasks/
+
+src/rfdetr/best_models/
+src/rfdetr/output/
+*.onnx
+*.csv
+*.mp4

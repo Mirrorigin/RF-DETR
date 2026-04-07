@@ -1,0 +1,49 @@
+20251022:
+
+/home/jingmliang/MyEnvs/rfdetr/bin/python3 -m torch.distributed.launch --master_port=29502 --use_env test.py
+Note that --use-env is set by default in torchrun.
+Loading pretrain weights
+Total 21 classes!
+loading annotations into memory...
+Done (t=0.03s)
+creating index...
+index created!
+creating index...
+index created!
+Eval images after filter: 2202 / original 2202
+Predicting:   0%|          | 0/276 [00:00<?, ?it/s]Model is not optimized for inference. Latency may be higher than expected. You can optimize the model for inference by calling model.optimize_for_inference().
+UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
+Predicting: 100%|██████████| 276/276 [01:31<00:00,  3.01it/s]
+Loading and preparing results...
+DONE (t=2.03s)
+creating index...
+index created!
+Running per image evaluation...
+Evaluate annotation type *bbox*
+DONE (t=16.33s).
+Accumulating evaluation results...
+DONE (t=4.22s).
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.397
+ Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.636
+ Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.404
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.142
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.379
+ Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.461
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.321
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.513
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.559
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.284
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.566
+ Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.628
+mAP @[ IoU=0.50 ]:  0.6357
+cellphone                      0.5290
+handgun                        0.6128
+longgun                        0.6842
+person_fallen                  0.7664
+person_sitting                 0.7431
+person_standing                0.8861
+snow                           0.3083
+spill                          0.3429
+vehicle                        0.8481
+
+Process finished with exit code 0

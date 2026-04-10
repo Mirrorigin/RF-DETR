@@ -1,9 +1,11 @@
+
 import numpy as np
 import cv2
 import os
 import torch
 import tensorrt as trt
 
+# TODO: Remember to check class_names.txt
 CLASS_NAMES = {
     1: "backpack",
     2: "broom",
@@ -21,18 +23,35 @@ CLASS_NAMES = {
     14: "vehicle"
 }
 
+# CLASS_NAMES = {
+#     1: "backpack",
+#     2: "broom",
+#     3: "cellphone",
+#     4: "handgun",
+#     5: "longgun",
+#     6: "person_fallen",
+#     7: "person_sitting",
+#     8: "person_standing",
+#     9: "reflection",
+#     10: "snow",
+#     11: "spill",
+#     12: "vehicle"
+# }
+
 # load Engine
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 runtime = trt.Runtime(TRT_LOGGER)
 
-with open("/home/jingmliang/Projects/RF-DETR/src/rfdetr/best_models/rfdetr.engine", "rb") as f:
+with open("/home/jingmliang/Projects/RF-DETR/src/rfdetr/best_models/rfdetr_v1.71.engine", "rb") as f:
     engine = runtime.deserialize_cuda_engine(f.read())
 
 context = engine.create_execution_context()
 
-input_shape = (1, 3, 704, 704)
+# TODO: Remember to change resolution size
+INPUT_SIZE = 1024
+input_shape = (1, 3, INPUT_SIZE, INPUT_SIZE)
 dets_shape = (1, 300, 4)
-labels_shape = (1, 300, 16)
+labels_shape = (1, 300, 15)
 
 # Fetch tensor names from the engine
 input_name = engine.get_tensor_name(0)
@@ -55,7 +74,7 @@ context.set_tensor_address(labels_name, d_labels.data_ptr())
 # Create the custom CUDA stream globally to manage GPU tasks
 custom_stream = torch.cuda.Stream()
 
-def preprocess_frame(frame, target_size=(704, 704)):
+def preprocess_frame(frame, target_size=(INPUT_SIZE, INPUT_SIZE)):
     orig_h, orig_w = frame.shape[:2]
 
     # Convert to RGB
@@ -183,7 +202,7 @@ def infer(input_image_data):
     return d_dets.cpu().numpy(), d_labels.cpu().numpy()
 
 if __name__ == "__main__":
-    input_media_path = "/home/jingmliang/Projects/Assets/Backyard_Home_1_with_frame_id.mp4"
+    input_media_path = "/home/jingmliang/Projects/Assets/Images/original_smoke_fire_2025-12-30T18_58_32_522353.jpg"
 
     # test.mp4 -> test_trt_result.mp4
     base_name, ext = os.path.splitext(os.path.basename(input_media_path))

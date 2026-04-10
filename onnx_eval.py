@@ -8,17 +8,21 @@ from tqdm import tqdm
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-CLS_NAMES = ["__background__", "backpack", "broom", "cellphone", "fire", "handgun", "longgun",
-             "person_fallen", "person_sitting", "person_standing", "reflection", "smoke", "snow",
-             "spill", "vehicle"]
+# TODO: Remember to change this
+CLS_NAMES = ["__background__", "backpack", "broom", "cellphone", # "fire",
+             "handgun", "longgun", "person_fallen", "person_sitting",
+             "person_standing", "reflection", # "smoke",
+             "snow", "spill", "vehicle"]
 
-ONNX_WEIGHTS = "/home/jingmliang/Projects/RF-DETR/src/rfdetr/best_models/Roboflow_RFDETR_weights.onnx"
-TEST_DIR = "/home/jingmliang/Downloads/Intellisee master dataset.v156-rf-detr-v1.74.coco/test"
-# TEST_DIR = "/Shared/nas4321/projects/intellisee/Master_1.71/test"
+ONNX_WEIGHTS = "/home/jingmliang/Projects/RF-DETR/src/rfdetr/best_models/Roboflow_RFDETR_weights_v1.71.onnx"
+# TEST_DIR = "/home/jingmliang/Downloads/Intellisee master dataset.v156-rf-detr-v1.74.coco/test"
+TEST_DIR = "/Shared/nas4321/projects/intellisee/Master_1.71/test"
 ANN_PATH = os.path.join(TEST_DIR, "_annotations.coco.json")
 BATCH_SIZE = 1
 CONF_THRESHOLD = 0.001
-INPUT_SIZE = (704, 704)
+
+# TODO: Remember to change this
+INPUT_SIZE = 1024
 
 def xyxy_to_xywh(box_xyxy):
     x1, y1, x2, y2 = map(float, box_xyxy)
@@ -61,7 +65,7 @@ def remapped_coco(coco_ann_path, target_classes):
     return remap
 
 class ONNXPredictor:
-    def __init__(self, onnx_path, input_size=(704, 704)):
+    def __init__(self, onnx_path, input_size=(INPUT_SIZE, INPUT_SIZE)):
         # Initialize the ONNX Runtime session
         self.session = ort.InferenceSession(
             onnx_path,
@@ -174,7 +178,7 @@ image_paths = [p for p in total_found if os.path.basename(p) in fname_to_imgid]
 print(f"Eval images after filter: {len(image_paths)} / original {len(total_found)}")
 
 # Initialize ONNX Model
-model = ONNXPredictor(onnx_path=ONNX_WEIGHTS, input_size=INPUT_SIZE)
+model = ONNXPredictor(onnx_path=ONNX_WEIGHTS, input_size=(INPUT_SIZE, INPUT_SIZE))
 
 coco_results = []
 for i in tqdm(range(0, len(image_paths), BATCH_SIZE), desc="Predicting (ONNX)"):

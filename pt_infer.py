@@ -1,16 +1,17 @@
 import cv2
 import torch
+import argparse
 import numpy as np
 
 
 BEST_WEIGHTS = "/home/jingmliang/Projects/RF-DETR/src/rfdetr/best_models/checkpoint_bigvision_latest_v1.pt"
 
-IMAGE_IN = "/home/jingmliang/Temp/DEBUG_IMG/gun/image_3.jpg"
-IMAGE_OUT = "rfdetr_image_output.jpg"
+DEFAULT_VIDEO_IN = "/home/jingmliang/Projects/Assets/Hoyt_26_04_24_Orbie.MP4"
+DEFAULT_VIDEO_OUT = "rfdetr_video_output.mp4"
+DEFAULT_CONF_THRESH = 0.1
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 INPUT_SIZE = 704
-CONF_THRESH = 0.1
 
 CLASS_NAMES = [
     "__background__",
@@ -36,7 +37,7 @@ def preprocess_bgr(frame_bgr, input_size=704, use_imagenet_norm=False):
 
     img = resized.astype(np.float32) / 255.0
 
-    # use_imagenet_norm=True: Assume that the Normalize preprocessing already be included inside the exported model.
+    # Keep use_imagenet_norm=False: Assume that the Normalize preprocessing already be included inside the exported model.
     if use_imagenet_norm:
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -136,6 +137,16 @@ def draw_detections(image_bgr, labels, boxes, scores, conf_thresh=0.5):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--video-in", type=str, default=DEFAULT_VIDEO_IN)
+    parser.add_argument("--video-out", type=str, default=DEFAULT_VIDEO_OUT)
+    parser.add_argument("--threshold", type=float, default=DEFAULT_CONF_THRESH)
+    args = parser.parse_args()
+
+    video_in = args.video_in
+    video_out = args.video_out
+    conf_thresh = args.threshold
+
     print("Loading model...")
     model = torch.jit.load(BEST_WEIGHTS, map_location=DEVICE)
     model.eval()
@@ -144,33 +155,69 @@ def main():
     print("Device:", DEVICE)
     print("Forward schema:", model.forward.schema)
 
-    image = cv2.imread(IMAGE_IN)
-    if image is None:
-        raise RuntimeError(f"Cannot read image: {IMAGE_IN}")
+    cap = cv2.VideoCapture(video_in)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_in}")
 
-    images, orig_target_sizes = preprocess_bgr(
-        image,
-        input_size=INPUT_SIZE,
-        use_imagenet_norm=False,
-    )
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    images = images.to(DEVICE)
-    orig_target_sizes = orig_target_sizes.to(DEVICE)
+    if fps <= 0:
+        fps = 30.0
+
+    print(f"Input video: {frame_w}x{frame_h}, fps={fps}, frames={total_frames}")
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(video_out, fourcc, fps, (frame_w, frame_h))
+
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Cannot create output video: {video_out}")
+
+    frame_idx = 0
+    total_kept = 0
 
     with torch.inference_mode():
-        labels, boxes, scores = model(images, orig_target_sizes)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-    drawn, kept = draw_detections(
-        image,
-        labels,
-        boxes,
-        scores,
-        conf_thresh=CONF_THRESH,
-    )
+            images, orig_target_sizes = preprocess_bgr(
+                frame,
+                input_size=INPUT_SIZE,
+                use_imagenet_norm=False,
+            )
 
-    cv2.imwrite(IMAGE_OUT, drawn)
-    print(f"Kept detections above {CONF_THRESH}: {kept}")
-    print(f"Saved result to: {IMAGE_OUT}")
+            images = images.to(DEVICE)
+            orig_target_sizes = orig_target_sizes.to(DEVICE)
+
+            labels, boxes, scores = model(images, orig_target_sizes)
+
+            drawn, kept = draw_detections(
+                frame,
+                labels,
+                boxes,
+                scores,
+                conf_thresh=conf_thresh,
+            )
+
+            writer.write(drawn)
+
+            frame_idx += 1
+            total_kept += kept
+
+            if frame_idx % 30 == 0:
+                print(f"Processed {frame_idx}/{total_frames}, detections in last frame: {kept}")
+
+    cap.release()
+    writer.release()
+
+    print(f"Done. Processed frames: {frame_idx}")
+    print(f"Total detections drawn: {total_kept}")
+    print(f"Saved result to: {video_out}")
 
 
 if __name__ == "__main__":

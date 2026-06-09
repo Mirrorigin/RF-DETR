@@ -29,7 +29,7 @@ __all__ = [
     "RFDETRSeg2XLarge",
 ]
 
-from deprecate import deprecated_class
+from deprecate import deprecated as deprecated_class
 
 from rfdetr.config import (
     ModelConfig,

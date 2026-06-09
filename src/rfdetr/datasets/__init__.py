@@ -83,6 +83,7 @@ def build_roboflow(image_set: str, args: Any, resolution: int) -> Dataset[Any]:
 
 
 def build_dataset(image_set: str, args: Any, resolution: int) -> Dataset[Any]:
+    # fixme: Add Customized dataset logic
     if args.dataset_file == "coco":
         return build_coco(image_set, args, resolution)
     if args.dataset_file == "o365":

@@ -5,9 +5,8 @@
 # ------------------------------------------------------------------------
 """Concrete RF-DETR model variant classes.
 
-All classes inherit from :class:`~rfdetr.detr.RFDETR` which remains defined in
-``rfdetr.detr``. Backward-compatible access from ``rfdetr.detr`` is provided
-via lazy ``__getattr__`` re-exports, so importing ``rfdetr.variants`` no longer
+All classes inherit from :class:`~rfdetr.detr.RFDETR` which remains defined in ``rfdetr.detr``. Backward-compatible
+access from ``rfdetr.detr`` is provided via lazy ``__getattr__`` re-exports, so importing ``rfdetr.variants`` no longer
 depends on a fragile eager ``detr -> variants`` import sequence.
 """
 
@@ -68,27 +67,21 @@ class RFDETRBase(RFDETR):
 
 
 class RFDETRNano(RFDETR):
-    """
-    Train an RF-DETR Nano model.
-    """
+    """Train an RF-DETR Nano model."""
 
     size = "rfdetr-nano"
     _model_config_class = RFDETRNanoConfig
 
 
 class RFDETRSmall(RFDETR):
-    """
-    Train an RF-DETR Small model.
-    """
+    """Train an RF-DETR Small model."""
 
     size = "rfdetr-small"
     _model_config_class = RFDETRSmallConfig
 
 
 class RFDETRMedium(RFDETR):
-    """
-    Train an RF-DETR Medium model.
-    """
+    """Train an RF-DETR Medium model."""
 
     size = "rfdetr-medium"
     _model_config_class = RFDETRMediumConfig
@@ -113,9 +106,8 @@ class RFDETRLarge(RFDETR):
     def _should_fallback_to_deprecated_config(exc: Exception) -> bool:
         """Return whether initialization should retry with deprecated Large config.
 
-        The fallback is only for known checkpoint/config incompatibilities from
-        deprecated Large weights. Runtime issues such as CUDA OOM must fail
-        fast and must not trigger a second initialization attempt.
+        The fallback is only for known checkpoint/config incompatibilities from deprecated Large weights. Runtime issues
+        such as CUDA OOM must fail fast and must not trigger a second initialization attempt.
 
         Args:
             exc: Exception raised by initial ``RFDETR`` initialization.
@@ -141,10 +133,18 @@ class RFDETRLarge(RFDETR):
     def __init__(self, **kwargs):
         self.init_error = None
         self.is_deprecated = False
+        # When the user explicitly sets a custom resolution, a PE size mismatch
+        # is caused by the resolution change — not by deprecated weights.  Guard
+        # against the fallback heuristic misclassifying it as deprecated weights.
+        # Only suppress the fallback when the provided resolution genuinely differs
+        # from the class default; passing resolution=<default> explicitly (e.g. from
+        # a serialised config round-trip) must still allow the deprecated-weights retry.
+        _default_resolution = RFDETRLargeConfig.model_fields["resolution"].default
+        _custom_resolution = "resolution" in kwargs and kwargs.get("resolution") != _default_resolution
         try:
             super().__init__(**kwargs)
         except (ValueError, RuntimeError) as exc:
-            if not self._should_fallback_to_deprecated_config(exc):
+            if _custom_resolution or not self._should_fallback_to_deprecated_config(exc):
                 raise
             self.init_error = exc
             self.is_deprecated = True
@@ -155,12 +155,19 @@ class RFDETRLarge(RFDETR):
                     "=" * 100 + "\n"
                     "WARNING: Automatically switched to deprecated model configuration,"
                     " due to using deprecated weights."
-                    " This will be removed in a future version.\n"
+                    " This will be removed in v1.9.0.\n"
                     " Please retrain your model with the new weights and configuration.\n"
                     "=" * 100 + "\n"
                 )
-            except Exception:
-                raise self.init_error
+            except Exception as retry_exc:
+                logger.exception(
+                    "Retry with deprecated RF-DETR Large configuration failed; "
+                    "re-raising the original initialization error for compatibility. "
+                    "Original error: %s",
+                    self.init_error,
+                    exc_info=retry_exc,
+                )
+                raise self.init_error from None
 
     def get_model_config(self, **kwargs) -> ModelConfig:
         if not self.is_deprecated:

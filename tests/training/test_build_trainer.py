@@ -3,10 +3,10 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
 """Tests for build_trainer() — PTL Ch3/T5 (callbacks) and Ch4/T1 (precision, loggers, trainer kwargs)."""
 
 import warnings
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -34,9 +34,8 @@ def _find_resume_checkpoints(trainer):
 def _tc(tmp_path, **kwargs):
     """Minimal TrainConfig for tests.
 
-    Loggers are disabled by default to avoid requiring optional deps (tensorboard,
-    wandb, mlflow) in the CPU test environment.  Logger-specific tests override these
-    explicitly via kwargs or mocking.
+    Loggers are disabled by default to avoid requiring optional deps (tensorboard, wandb, mlflow) in the CPU test
+    environment.  Logger-specific tests override these explicitly via kwargs or mocking.
     """
     defaults = dict(
         dataset_dir=str(tmp_path / "ds"),
@@ -88,6 +87,12 @@ class TestBuildTrainerCallbacks:
         trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc())
         types = [type(cb) for cb in trainer.callbacks]
         assert BestModelCallback in types
+
+    def test_skip_best_epochs_forwarded_to_best_model_callback(self, tmp_path):
+        """BestModelCallback receives skip_best_epochs from TrainConfig."""
+        trainer = build_trainer(_tc(tmp_path, use_ema=False, skip_best_epochs=3), _mc())
+        best_cb = next(cb for cb in trainer.callbacks if isinstance(cb, BestModelCallback))
+        assert best_cb._skip_best_epochs == 3
 
     def test_latest_model_checkpoint_present(self, tmp_path):
         """A ModelCheckpoint (not BestModelCallback) with every_n_epochs==1 is included when checkpoint_interval > 1."""
@@ -192,6 +197,12 @@ class TestBuildTrainerCallbacks:
         types = [type(cb) for cb in trainer.callbacks]
         assert RFDETREarlyStopping in types
 
+    def test_skip_best_epochs_forwarded_to_early_stopping(self, tmp_path):
+        """RFDETREarlyStopping receives skip_best_epochs from TrainConfig."""
+        trainer = build_trainer(_tc(tmp_path, early_stopping=True, skip_best_epochs=4), _mc())
+        early_stop_cb = next(cb for cb in trainer.callbacks if isinstance(cb, RFDETREarlyStopping))
+        assert early_stop_cb._skip_best_epochs == 4
+
     def test_no_early_stopping_when_disabled(self, tmp_path):
         """RFDETREarlyStopping is absent when early_stopping=False."""
         trainer = build_trainer(_tc(tmp_path, early_stopping=False), _mc())
@@ -219,12 +230,12 @@ class TestBuildTrainerPrecision:
     """build_trainer() must resolve training precision from model_config.amp + device caps."""
 
     def test_amp_false_gives_32_true(self, tmp_path):
-        """amp=False always produces '32-true' regardless of device."""
+        """Amp=False always produces '32-true' regardless of device."""
         trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=False))
         assert trainer.precision == "32-true"
 
     def test_amp_true_cpu_gives_32_true(self, tmp_path):
-        """amp=True on CPU (no CUDA, no MPS) must fall back to '32-true'."""
+        """Amp=True on CPU (no CUDA, no MPS) must fall back to '32-true'."""
         import unittest.mock as mock
 
         with (
@@ -234,14 +245,31 @@ class TestBuildTrainerPrecision:
             trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
         assert trainer.precision == "32-true"
 
-    def test_amp_true_cuda_no_bf16_gives_16_mixed(self, tmp_path):
-        """amp=True with CUDA but no bf16 support must produce '16-mixed'.
+    def test_amp_true_explicit_cpu_accelerator_gives_32_true_even_with_mps(self, tmp_path):
+        """Amp=True with explicit accelerator='cpu' must produce '32-true' even when MPS is present.
 
-        We mock the Trainer constructor to capture the precision kwarg rather
-        than inspecting trainer.precision after construction: PTL may re-detect
-        hardware bf16 support during __init__ and normalise the precision string
-        on machines that happen to have a bf16-capable GPU.
+        bf16 autocast on macOS CPU (Apple Silicon) is ~13x slower than fp32 — no hardware support for bfloat16 in CPU
+        kernels causes software emulation.  When the caller explicitly opts into CPU (e.g. for test isolation), mixed
+        precision must not be used.
         """
+        import unittest.mock as mock
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        with (
+            mock.patch("torch.cuda.is_available", return_value=False),
+            mock.patch("torch.backends.mps.is_available", return_value=True),
+            mock.patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer),
+        ):
+            build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True), accelerator="cpu")
+        assert captured["precision"] == "32-true"
+
+    def test_amp_true_cuda_no_bf16_gives_16_mixed(self, tmp_path):
+        """Amp=True with CUDA but no bf16 support must produce '16-mixed'."""
         import unittest.mock as mock
 
         captured: dict = {}
@@ -259,12 +287,7 @@ class TestBuildTrainerPrecision:
         assert captured["precision"] == "16-mixed"
 
     def test_amp_true_cuda_bf16_supported_gives_bf16_mixed(self, tmp_path):
-        """amp=True with CUDA + bf16 hardware produces 'bf16-mixed' (scaler-free).
-
-        On Ampere+ GPUs (bf16 supported) we select bf16-mixed to eliminate
-        GradScaler overhead.  Fine-tuning from pretrained weights is safe with
-        BF16; callers training from scratch can override via trainer_kwargs.
-        """
+        """Amp=True with CUDA + bf16 hardware produces 'bf16-mixed'."""
         import unittest.mock as mock
 
         captured: dict = {}
@@ -281,13 +304,84 @@ class TestBuildTrainerPrecision:
             build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
         assert captured["precision"] == "bf16-mixed"
 
+    @patch("torch.cuda.is_available", return_value=True)
+    @patch("torch.cuda.is_bf16_supported", return_value=False)
+    @patch("rfdetr.training.trainer.Trainer")
+    def test_amp_true_ddp_notebook_probes_bf16_normally(
+        self, mock_trainer: MagicMock, _mock_bf16: MagicMock, _mock_cuda: MagicMock, tmp_path
+    ):
+        """ddp_notebook uses standard precision probing (spawn makes CUDA init safe).
+
+        With spawn-based DDP, child processes start fresh — CUDA init in the parent does not propagate.  So
+        ``is_bf16_supported()`` is safe to call and pre-Ampere GPUs correctly get ``16-mixed`` instead of the slower
+        bf16 emulation path.  Simulates pre-Ampere GPU: CUDA available, bf16 NOT supported.
+        """
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        mock_trainer.side_effect = _fake_trainer
+        build_trainer(
+            _tc(tmp_path, use_ema=False, strategy="ddp_notebook"),
+            _mc(amp=True),
+        )
+        assert captured["precision"] == "16-mixed"
+
+    @pytest.mark.parametrize("strategy_name", ["ddp_notebook", "ddp_spawn"])
+    def test_ddp_notebook_and_spawn_use_interactive_spawn(self, tmp_path, strategy_name):
+        """ddp_notebook and ddp_spawn must be replaced with interactive spawn DDPStrategy.
+
+        Fork-based DDP inherits the parent's OpenMP thread pool which is invalid after fork, causing SIGABRT in the
+        autograd engine. ddp_spawn is blocked by PTL in notebooks without the override.
+        """
+        import unittest.mock as mock
+
+        from pytorch_lightning.strategies import DDPStrategy
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        with mock.patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer):
+            build_trainer(
+                _tc(tmp_path, use_ema=False, strategy=strategy_name),
+                _mc(amp=True),
+            )
+        strategy_obj = captured["strategy"]
+        assert isinstance(strategy_obj, DDPStrategy)
+        assert strategy_obj._start_method == "spawn"
+        assert strategy_obj._ddp_kwargs.get("find_unused_parameters") is True
+
+    @patch("rfdetr.training.trainer._InteractiveSpawnLauncher", None)
+    def test_ddp_notebook_raises_clear_error_when_private_launcher_is_missing(self, tmp_path):
+        """Missing private PTL launcher should raise a targeted compatibility error."""
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer):
+            build_trainer(
+                _tc(tmp_path, use_ema=False, strategy="ddp_notebook"),
+                _mc(amp=True),
+            )
+
+        strategy = captured["strategy"]
+        strategy.cluster_environment = object()
+        with pytest.raises(RuntimeError, match="private API"):
+            strategy._configure_launcher()
+
 
 class TestBuildTrainerEMAShardingGuard:
     """EMA must be disabled and a UserWarning emitted for sharded strategies.
 
-    PTL validates strategy+accelerator compatibility at Trainer construction time,
-    so tests that exercise sharded strategies mock Trainer to capture the callback
-    list without triggering platform-specific validation.
+    PTL validates strategy+accelerator compatibility at Trainer construction time, so tests that exercise sharded
+    strategies mock Trainer to capture the callback list without triggering platform-specific validation.
     """
 
     @pytest.mark.parametrize(
@@ -406,7 +500,7 @@ class TestBuildTrainerLoggers:
         assert any(isinstance(lg, CSVLogger) for lg in trainer.loggers)
 
     def test_clearml_flag_raises_not_implemented(self, tmp_path):
-        """clearml=True must raise NotImplementedError (not yet supported)."""
+        """Clearml=True must raise NotImplementedError (not yet supported)."""
         with pytest.raises(NotImplementedError, match="ClearML"):
             build_trainer(
                 _tc(tmp_path, clearml=True, use_ema=False),
@@ -583,3 +677,96 @@ class TestBuildTrainerDDPFields:
         tc = _tc(tmp_path, use_ema=False, devices="auto")
         # Should not raise during config construction.
         assert tc.devices == "auto"
+
+
+class TestBuildTrainerSegmentationDDP:
+    """build_trainer() must enable find_unused_parameters when segmentation_head=True + strategy='ddp'."""
+
+    def test_ddp_segmentation_enables_find_unused_parameters(self, tmp_path):
+        """Strategy='ddp' + segmentation_head=True must produce DDPStrategy(find_unused_parameters=True).
+
+        The segmentation head's sparse_forward() leaves parameters unused on some forward steps.  Plain DDP raises
+        RuntimeError unless find_unused_parameters is enabled.
+        """
+        import unittest.mock as mock
+
+        from pytorch_lightning.strategies import DDPStrategy
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        tc = _tc(tmp_path, use_ema=False, strategy="ddp")
+        mc = _mc(segmentation_head=True)
+        with mock.patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer):
+            build_trainer(tc, mc)
+
+        strategy_obj = captured["strategy"]
+        assert isinstance(strategy_obj, DDPStrategy)
+        assert strategy_obj._ddp_kwargs.get("find_unused_parameters") is True
+
+    def test_ddp_no_segmentation_strategy_unchanged(self, tmp_path):
+        """Strategy='ddp' without segmentation_head must pass the string through unchanged.
+
+        Only the segmentation path needs find_unused_parameters; standard detection DDP must not be wrapped
+        unnecessarily to avoid the autograd-graph traversal overhead on every backward pass.
+        """
+        import unittest.mock as mock
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        tc = _tc(tmp_path, use_ema=False, strategy="ddp")
+        mc = _mc(segmentation_head=False)
+        with mock.patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer):
+            build_trainer(tc, mc)
+
+        assert captured["strategy"] == "ddp"
+
+    def test_ddp_spawn_segmentation_preserves_find_unused_parameters(self, tmp_path):
+        """strategy='ddp_spawn' + segmentation_head=True must keep find_unused_parameters=True.
+
+        ddp_spawn is already replaced with an interactive-spawn DDPStrategy that has find_unused_parameters=True for
+        notebook compatibility.  Segmentation must not accidentally drop that flag when the ddp_spawn path is taken
+        instead of the plain 'ddp' path.
+        """
+        import unittest.mock as mock
+
+        from pytorch_lightning.strategies import DDPStrategy
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        tc = _tc(tmp_path, use_ema=False, strategy="ddp_spawn")
+        mc = _mc(segmentation_head=True)
+        with mock.patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer):
+            build_trainer(tc, mc)
+
+        strategy_obj = captured["strategy"]
+        assert isinstance(strategy_obj, DDPStrategy)
+        assert strategy_obj._ddp_kwargs.get("find_unused_parameters") is True
+
+    def test_non_ddp_strategy_with_segmentation_is_unchanged(self, tmp_path):
+        """Strategies other than 'ddp' must not be wrapped even when segmentation is on."""
+        import unittest.mock as mock
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        tc = _tc(tmp_path, use_ema=False, strategy="auto")
+        mc = _mc(segmentation_head=True)
+        with mock.patch("rfdetr.training.trainer.Trainer", side_effect=_fake_trainer):
+            build_trainer(tc, mc)
+
+        assert captured["strategy"] == "auto"

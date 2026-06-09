@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 class ModelContext:
     """Lightweight model wrapper returned by RFDETR.get_model().
 
-    Provides the same attribute interface as the legacy ``main.py:Model`` but
-    without importing or depending on ``populate_args()`` or the legacy stack.
+    Provides the same attribute interface as the legacy ``main.py:Model`` but without importing or depending on
+    ``populate_args()`` or the legacy stack.
 
     Args:
         model: The underlying ``nn.Module`` (LWDETR instance).
@@ -67,17 +67,46 @@ class ModelContext:
 _ModelContext = ModelContext  # backward-compat alias
 
 
+def _adapt_input_conv(num_channels: int, conv_weight: torch.Tensor) -> torch.Tensor:
+    """Adapt a 3-channel pretrained conv weight tensor to *num_channels* input channels.
+
+    When ``num_channels == 3``: returns the weight unchanged. When ``num_channels == 1``: averages weights across the
+    original 3 channels.
+    Otherwise (``num_channels != 1`` and ``num_channels != 3``): tiles the 3-channel
+    pattern and scales by ``3 / num_channels`` to preserve activation magnitude.
+
+    Args:
+        num_channels: Target number of input channels.
+        conv_weight: Original weight tensor of shape ``[out_ch, 3, H, W]``.
+
+    Returns:
+        Adapted weight tensor of shape ``[out_ch, num_channels, H, W]``.
+    """
+    if num_channels == 3:
+        return conv_weight
+    if num_channels == 1:
+        return conv_weight.mean(dim=1, keepdim=True)
+    # General case: tile and scale
+    repeats = (num_channels + 2) // 3
+    weight_out = torch.cat([conv_weight] * repeats, dim=1)[:, :num_channels]
+    weight_out = weight_out * (3.0 / num_channels)
+    return weight_out
+
+
 def _build_model_context(model_config: ModelConfig) -> ModelContext:
     """Build a ModelContext from ModelConfig without using legacy main.py:Model.
 
-    Replicates ``Model.__init__`` logic: builds the nn.Module, optionally loads
-    pretrain weights and applies LoRA, then moves the model to the target device.
+    Replicates ``Model.__init__`` logic: builds the nn.Module, optionally loads pretrain weights and applies LoRA.  The
+    model is intentionally kept on CPU; :func:`_ensure_model_on_device` in ``detr.py`` performs the deferred
+    ``.to(device)`` on the first ``predict()`` / ``export()`` / ``optimize_for_inference()`` call.  Keeping construction
+    CPU-only prevents CUDA initialisation during ``__init__``, which would block DDP strategies (``ddp_notebook``,
+    ``ddp_spawn``) from spawning child processes in notebook environments.
 
     Args:
         model_config: Architecture configuration.
 
     Returns:
-        Fully initialised ModelContext ready for inference or training.
+        ModelContext with the model on CPU, ready for lazy device placement.
     """
     from rfdetr._namespace import _namespace_from_configs
 
@@ -98,8 +127,25 @@ def _build_model_context(model_config: ModelConfig) -> ModelContext:
     if model_config.backbone_lora:
         apply_lora(nn_model)
 
+    # Adapt patch-embedding projection for non-RGB channel counts
+    if model_config.num_channels != 3:
+        import copy
+
+        proj = nn_model.backbone[0].encoder.encoder.embeddings.patch_embeddings.projection
+        new_proj = copy.deepcopy(proj)
+        new_proj.in_channels = model_config.num_channels
+        new_weight = _adapt_input_conv(model_config.num_channels, proj.weight)
+        new_proj.weight = torch.nn.Parameter(new_weight)
+        new_proj.weight.requires_grad = proj.weight.requires_grad
+        nn_model.backbone[0].encoder.encoder.embeddings.patch_embeddings.projection = new_proj
+        nn_model.backbone[0].encoder.encoder.embeddings.patch_embeddings.num_channels = model_config.num_channels
+
     device = torch.device(args.device)
-    nn_model = nn_model.to(device)
+    # Keep the model on CPU here; predict() / export() / optimize_for_inference()
+    # will lazily move it to the target device on first use.  Eagerly calling
+    # .to("cuda") would initialise the CUDA runtime during __init__(), which
+    # prevents DDP strategies (ddp_notebook, ddp_spawn) from forking/spawning
+    # child processes in notebook environments.
     postprocess = PostProcess(num_select=args.num_select)
 
     return ModelContext(

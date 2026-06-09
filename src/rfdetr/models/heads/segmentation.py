@@ -8,13 +8,136 @@ from typing import Any, Callable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 
 from rfdetr.utilities.tensors import _bilinear_grid_sample
 
 
+class _DepthwiseConvWithoutCuDNN(torch.autograd.Function):
+    """Depthwise conv2d with cuDNN disabled in both forward and backward.
+
+    ``torch.backends.cudnn.flags(enabled=False)`` as a context manager only covers operations executed within its scope.
+    ``nn.Conv2d`` records the forward op in the autograd graph; the corresponding backward kernels run later,
+    **outside** that scope, with cuDNN re-enabled.  On some CUDA stacks (T4 / P100 on Kaggle / Colab) cuDNN fails engine
+    selection for depthwise conv backward, raising::
+
+        RuntimeError: GET was unable to find an engine to execute this computation
+
+    This ``Function`` disables cuDNN in ``backward`` as well, fixing the crash.
+
+    See: https://github.com/roboflow/rf-detr/issues/731
+    """
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        stride: tuple[int, ...],
+        padding: tuple[int, ...],
+        dilation: tuple[int, ...],
+        groups: int,
+    ) -> torch.Tensor:
+        """Run depthwise conv2d forward with cuDNN disabled.
+
+        Args:
+            ctx: Autograd context.
+            x: Input feature map ``(N, C, H, W)``.
+            weight: Convolution weight tensor.
+            bias: Optional convolution bias tensor.
+            stride: Convolution stride.
+            padding: Convolution padding.
+            dilation: Convolution dilation.
+            groups: Number of groups (equals ``C`` for depthwise).
+
+        Returns:
+            Output feature map ``(N, C, H, W)``.
+        """
+        ctx.save_for_backward(x, weight)
+        ctx.has_bias = bias is not None
+        ctx.stride = stride
+        ctx.padding = padding
+        ctx.dilation = dilation
+        ctx.groups = groups
+        # Note: torch.backends.cudnn.flags() is process-global state, not op-local.
+        # Safe under DDP (separate processes per rank), but concurrent backward passes
+        # in the same process (DataParallel, user threads) could briefly observe the
+        # wrong cuDNN setting.  For DDP-only training this is not a concern.
+        with torch.backends.cudnn.flags(enabled=False):
+            return F.conv2d(x, weight, bias, stride=stride, padding=padding, dilation=dilation, groups=groups)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, None, None, None, None]:
+        """Compute gradients with cuDNN disabled.
+
+        Args:
+            ctx: Autograd context with saved tensors and conv parameters.
+            grad_output: Upstream gradient ``(N, C, H, W)``.
+
+        Returns:
+            Gradients for each ``forward`` input.  Inputs that do not require gradients (``ctx.needs_input_grad[i]`` is
+            ``False``) get ``None``. Non-tensor inputs always get ``None``.
+
+        Note:
+            Under AMP (``"bf16-mixed"`` or ``"16-mixed"``), ``grad_output`` may arrive in a reduced dtype while the
+            saved ``weight`` stays ``fp32``.  Both tensors are upcast to ``weight.dtype`` before calling
+            ``conv2d_input`` / ``conv2d_weight``.  ``grad_input`` is kept in ``weight.dtype`` (fp32) so that upstream
+            gradient accumulation into fp32 leaf parameters stays in fp32 — matching standard ``F.conv2d`` backward
+            behaviour.  Casting back to the activation dtype (``x.dtype``) would propagate a reduced-precision gradient
+            to fp32 backbone parameters, causing a ``params, grads, exp_avgs, and exp_avg_sqs must have same dtype``
+            crash in fused AdamW (see issue #959).
+        """
+        x, weight = ctx.saved_tensors
+
+        needs_x_grad = ctx.needs_input_grad[0]
+        needs_w_grad = ctx.needs_input_grad[1]
+        needs_b_grad = ctx.has_bias and ctx.needs_input_grad[2]
+
+        grad_input = None
+        grad_weight = None
+        grad_bias = None
+
+        if needs_x_grad or needs_w_grad:
+            # Under AMP, grad_output may arrive in a reduced dtype (fp16/bf16) while
+            # weight stays fp32.  conv2d_input/conv2d_weight require matching dtypes,
+            # so upcast to weight.dtype (fp32).  grad_input is kept in weight.dtype —
+            # casting back to x.dtype would inject a bf16 gradient into fp32 params.
+            grad_output_cast = grad_output.to(dtype=weight.dtype)
+            # Same process-global caveat as forward: safe under DDP, not under DataParallel.
+            with torch.backends.cudnn.flags(enabled=False):
+                if needs_x_grad:
+                    grad_input = torch.nn.grad.conv2d_input(
+                        x.shape,
+                        weight,
+                        grad_output_cast,
+                        stride=ctx.stride,
+                        padding=ctx.padding,
+                        dilation=ctx.dilation,
+                        groups=ctx.groups,
+                    )  # kept in weight.dtype (fp32) — do NOT cast back to x.dtype
+                if needs_w_grad:
+                    grad_weight = torch.nn.grad.conv2d_weight(
+                        x.to(dtype=weight.dtype),
+                        weight.shape,
+                        grad_output_cast,
+                        stride=ctx.stride,
+                        padding=ctx.padding,
+                        dilation=ctx.dilation,
+                        groups=ctx.groups,
+                    )
+
+        if needs_b_grad:
+            grad_bias = grad_output.to(dtype=weight.dtype).sum(dim=(0, 2, 3))
+
+        return grad_input, grad_weight, grad_bias, None, None, None, None
+
+
 class DepthwiseConvBlock(nn.Module):
-    r"""Simplified ConvNeXt block without the MLP subnet"""
+    r"""Simplified ConvNeXt block without the MLP subnet."""
 
     def __init__(self, dim, layer_scale_init_value=0):
         super().__init__()
@@ -29,10 +152,19 @@ class DepthwiseConvBlock(nn.Module):
         )
 
     def _depthwise_conv(self, x: torch.Tensor) -> torch.Tensor:
-        # Always run this depthwise conv with cuDNN disabled to avoid
-        # backend engine selection failures on some CUDA stacks (e.g. T4/Colab).
-        with torch.backends.cudnn.flags(enabled=False):
-            return self.dwconv(x)
+        # Custom autograd Function so cuDNN is disabled in both forward AND
+        # backward.  A plain context-manager only covers forward; the backward
+        # for nn.Conv2d runs outside that scope and re-enables cuDNN,
+        # triggering RuntimeError on T4/P100 GPUs (issue #731).
+        return _DepthwiseConvWithoutCuDNN.apply(
+            x,
+            self.dwconv.weight,
+            self.dwconv.bias,
+            self.dwconv.stride,
+            self.dwconv.padding,
+            self.dwconv.dilation,
+            self.dwconv.groups,
+        )
 
     def forward(self, x):
         input = x
@@ -198,10 +330,8 @@ class SegmentationHead(nn.Module):
 
 
 def point_sample(input: torch.Tensor, point_coords: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-    """
-    A wrapper around :func:`~rfdetr.utilities.tensors._bilinear_grid_sample` to support 3D point_coords tensors.
-    Unlike :func:`torch.nn.functional.grid_sample` it assumes `point_coords` to lie inside
-    [0, 1] x [0, 1] square.
+    """A wrapper around :func:`~rfdetr.utilities.tensors._bilinear_grid_sample` to support 3D point_coords tensors.
+    Unlike :func:`torch.nn.functional.grid_sample` it assumes `point_coords` to lie inside [0, 1] x [0, 1] square.
 
     Args:
         input: A tensor of shape (N, C, H, W) that contains features map on a H x W grid.
@@ -273,18 +403,15 @@ def get_uncertain_point_coords_with_randomness(
     oversample_ratio: int = 3,
     importance_sample_ratio: float = 0.75,
 ) -> torch.Tensor:
-    """
-    Sample points in [0, 1] x [0, 1] coordinate space based on their uncertainty. The unceratinties
-        are calculated for each point using 'uncertainty_func' function that takes point's logit
-        prediction as input.
-    See PointRend paper for details.
+    """Sample points in [0, 1] x [0, 1] coordinate space based on their uncertainty. The unceratinties are calculated
+    for each point using 'uncertainty_func' function that takes point's logit prediction as input. See PointRend paper
+    for details.
 
     Args:
         coarse_logits: A tensor of shape (N, C, Hmask, Wmask) or (N, 1, Hmask, Wmask) for
             class-specific or class-agnostic prediction.
         uncertainty_func: A function that takes a Tensor of shape (N, C, P) or (N, 1, P) that
-            contains logit predictions for P points and returns their uncertainties as a Tensor of
-            shape (N, 1, P).
+            contains logit predictions for P points and returns their uncertainties as a Tensor of shape (N, 1, P).
         num_points: The number of points P to sample.
         oversample_ratio: Oversampling parameter.
         importance_sample_ratio: Ratio of points that are sampled via importnace sampling.
@@ -324,18 +451,17 @@ def get_uncertain_point_coords_with_randomness(
 
 
 def calculate_uncertainty(logits: torch.Tensor) -> torch.Tensor:
-    """
-    We estimate uncertainty as L1 distance between 0.0 and the logit prediction in 'logits' for the
-        foreground class in `classes`.
+    """We estimate uncertainty as L1 distance between 0.0 and the logit prediction in 'logits' for the foreground class
+    in `classes`.
 
     Args:
         logits: A tensor of shape (R, 1, ...) for class-specific or
-            class-agnostic, where R is the total number of predicted masks in all images and C is
-            the number of foreground classes. The values are logits.
+            class-agnostic, where R is the total number of predicted masks in all images and C is the number of
+            foreground classes. The values are logits.
 
     Returns:
-        A tensor of shape (R, 1, ...) that contains uncertainty scores with the most
-        uncertain locations having the highest uncertainty score.
+        A tensor of shape (R, 1, ...) that contains uncertainty scores with the most uncertain locations having the
+        highest uncertainty score.
     """
     assert logits.shape[1] == 1
     gt_class_logits = logits.clone()

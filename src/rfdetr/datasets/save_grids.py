@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import supervision as sv
 import torch
-import torchvision.transforms as T
+import torchvision.transforms as T  # noqa: N812
 from matplotlib.axes import Axes
 from torch.utils.data import DataLoader
 
@@ -43,8 +43,8 @@ class DatasetGridSaver:
     def save_grid(self) -> None:
         """Create and save image grids to ``output_dir``.
 
-        Each grid is a 3x3 JPEG containing up to 9 images from a single batch,
-        with bounding boxes and class labels drawn on top.
+        Each grid is a 3x3 JPEG containing up to 9 images from a single batch, with bounding boxes and class labels
+        drawn on top.
         """
         inv_normalize = T.Normalize(
             mean=[-0.485 / 0.229, -0.456 / 0.224, -0.406 / 0.225],

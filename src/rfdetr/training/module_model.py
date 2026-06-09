@@ -3,7 +3,6 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
 """LightningModule for RF-DETR training and validation."""
 
 from __future__ import annotations
@@ -14,14 +13,14 @@ import warnings
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812 -- project-conventional alias (see AGENTS.md)
 from pytorch_lightning import LightningModule, seed_everything
 
 from rfdetr._namespace import _namespace_from_configs
 from rfdetr.config import ModelConfig, TrainConfig
 from rfdetr.datasets.coco import compute_multi_scale_scales
-from rfdetr.models import build_criterion_from_config, build_model_from_config
-from rfdetr.models.weights import apply_lora, load_pretrain_weights
+from rfdetr.models.lwdetr import build_criterion_from_config, build_model_from_config
+from rfdetr.models.weights import apply_lora, interpolate_position_embeddings, load_pretrain_weights
 from rfdetr.training.param_groups import get_param_dict
 from rfdetr.utilities.logger import get_logger
 
@@ -47,27 +46,28 @@ class RFDETRModelModule(LightningModule):
         # Model, criterion, and postprocessor.
         self.model = build_model_from_config(model_config, train_config)
         if model_config.pretrain_weights is not None:
-            # Capture the configured class count before loading weights so we can
-            # detect any automatic alignment to the checkpoint.
-            prev_num_classes = self.model_config.num_classes
+            # Canonical loader handles PE interpolation, PTL .ckpt normalisation,
+            # per-group query slicing, class-name extraction, partial-load warnings,
+            # and writes any auto-aligned ``num_classes`` back onto ``model_config``.
             load_pretrain_weights(self.model, self.model_config)
-            # If the loaded checkpoint changed the model's effective number of
-            # classes (e.g. to match a fine-tuned head), persist that back onto
-            # the model_config so downstream components see the aligned value.
-            if hasattr(self.model, "num_classes"):
-                model_num_classes = getattr(self.model, "num_classes")
-                if model_num_classes is not None and model_num_classes != prev_num_classes:
-                    self.model_config.num_classes = model_num_classes
         if model_config.backbone_lora:
             apply_lora(self.model)
 
-        # Build criterion and postprocessor after potential num_classes
-        # alignment so they match the current model head.
+        # Build criterion/postprocessors after potential num_classes alignment so
+        # they are constructed with a config that matches the current model head.
         self.criterion, self.postprocess = build_criterion_from_config(self.model_config, self.train_config)
 
         # torch.compile is opt-in: set model_config.compile=True to enable.
         # Only enabled on CUDA; MPS and CPU do not benefit from compilation.
-        compile_enabled = model_config.compile and torch.cuda.is_available() and not train_config.multi_scale
+        # Use the fork-safe DEVICE constant instead of torch.cuda.is_available(),
+        # which creates a CUDA driver context that breaks fork-based DDP.
+        from rfdetr.config import DEVICE
+
+        accelerator = str(train_config.accelerator).lower()
+        uses_cuda_accelerator = accelerator in {"auto", "gpu", "cuda"}
+        compile_enabled = (
+            model_config.compile and DEVICE == "cuda" and uses_cuda_accelerator and not train_config.multi_scale
+        )
         if model_config.compile and train_config.multi_scale:
             logger.info("Disabling torch.compile because multi_scale=True introduces dynamic input shapes.")
         if compile_enabled:
@@ -91,8 +91,8 @@ class RFDETRModelModule(LightningModule):
     def on_fit_start(self) -> None:
         """Seed RNGs at fit start when ``TrainConfig.seed`` is set.
 
-        This avoids hidden global side-effects in ``build_trainer`` while still
-        preserving deterministic training behaviour for actual fit runs.
+        This avoids hidden global side-effects in ``build_trainer`` while still preserving deterministic training
+        behaviour for actual fit runs.
         """
         if self.train_config.seed is not None:
             seed_everything(self.train_config.seed + self.global_rank, workers=True)
@@ -100,8 +100,8 @@ class RFDETRModelModule(LightningModule):
     def on_train_batch_start(self, batch: Tuple, batch_idx: int) -> None:
         """Apply optional multi-scale resize to the incoming batch.
 
-        Modifications to ``batch`` (in-place on ``NestedTensor``) are visible
-        in ``training_step`` because they share the same object.
+        Modifications to ``batch`` (in-place on ``NestedTensor``) are visible in ``training_step`` because they share
+        the same object.
 
         Args:
             batch: Tuple of (NestedTensor samples, list of target dicts).
@@ -125,12 +125,10 @@ class RFDETRModelModule(LightningModule):
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
         """Compute loss for one training step and log metrics.
 
-        PTL handles gradient accumulation (``accumulate_grad_batches``), AMP
-        (``precision``), and gradient clipping (``gradient_clip_val``) — no
-        manual ``GradScaler`` or loss scaling here.  The loss is divided by
-        ``trainer.accumulate_grad_batches`` so that the accumulated gradient
-        magnitude matches the legacy engine (which scales each sub-batch by
-        ``1/grad_accum_steps`` before calling ``backward()``).
+        PTL handles gradient accumulation (``accumulate_grad_batches``), AMP (``precision``), and gradient clipping
+        (``gradient_clip_val``) — no manual ``GradScaler`` or loss scaling here.  The loss is divided by
+        ``trainer.accumulate_grad_batches`` so that the accumulated gradient magnitude matches the legacy engine (which
+        scales each sub-batch by ``1/grad_accum_steps`` before calling ``backward()``).
 
         Args:
             batch: Tuple of (NestedTensor samples, list of target dicts).
@@ -189,8 +187,8 @@ class RFDETRModelModule(LightningModule):
     def validation_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
         """Run forward pass and postprocess for one validation step.
 
-        Returns raw results and targets so ``COCOEvalCallback`` can accumulate
-        them across the epoch via ``on_validation_batch_end``.
+        Returns raw results and targets so ``COCOEvalCallback`` can accumulate them across the epoch via
+        ``on_validation_batch_end``.
 
         Args:
             batch: Tuple of (NestedTensor samples, list of target dicts).
@@ -211,12 +209,39 @@ class RFDETRModelModule(LightningModule):
         results = self.postprocess(outputs, orig_sizes)
         return {"results": results, "targets": targets}
 
+    @property
+    def _use_fused_optimizer(self) -> bool:
+        """Return whether fused AdamW should be used for the current training configuration.
+
+        Fused AdamW is only safe when the trainer's actual precision is a BF16 variant.  Checking GPU capability alone
+        (``is_bf16_supported()``) is
+        insufficient: on Ampere+ hardware that flag is always ``True`` even when
+        the trainer is configured for ``32-true``, which causes a ``params, grads, exp_avgs, and exp_avg_sqs must have
+        same dtype, device, and layout`` crash in DDP because gradient bucket views have non-matching strides in FP32.
+
+        Returns:
+            ``True`` when fused AdamW is both requested and safe to use.
+
+        Examples:
+            >>> from unittest.mock import patch
+            >>> module = RFDETRModelModule.__new__(RFDETRModelModule)
+            >>> module.model_config = type("Cfg", (), {"fused_optimizer": True})()
+            >>> with patch("torch.cuda.is_available", return_value=False):
+            ...     module._use_fused_optimizer
+            False
+        """
+        return (
+            self.model_config.fused_optimizer
+            and torch.cuda.is_available()
+            and torch.cuda.is_bf16_supported()
+            and str(self.trainer.precision) in {"bf16-mixed", "bf16", "bf16-true"}
+        )
+
     def configure_optimizers(self) -> Dict[str, Any]:
         """Build AdamW optimizer with layer-wise LR decay and LambdaLR scheduler.
 
-        Uses ``trainer.estimated_stepping_batches`` for total step count so
-        cosine annealing covers the full training run regardless of dataset
-        size or accumulation settings.
+        Uses ``trainer.estimated_stepping_batches`` for total step count so cosine annealing covers the full training
+        run regardless of dataset size or accumulation settings.
 
         Returns:
             PTL optimizer config dict with optimizer and step-interval scheduler.
@@ -230,12 +255,11 @@ class RFDETRModelModule(LightningModule):
         model_for_params = getattr(self.model, "_orig_mod", self.model)
         param_dicts = get_param_dict(ns, model_for_params)
         param_dicts = [p for p in param_dicts if p["params"].requires_grad]
-        use_fused = self.model_config.fused_optimizer and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
         optimizer = torch.optim.AdamW(
             param_dicts,
             lr=tc.lr,
             weight_decay=tc.weight_decay,
-            fused=use_fused,
+            fused=self._use_fused_optimizer,
         )
 
         total_steps = int(self.trainer.estimated_stepping_batches)
@@ -268,11 +292,9 @@ class RFDETRModelModule(LightningModule):
     ) -> None:
         """Override PTL gradient clipping to support fused AdamW.
 
-        PTL's AMP precision plugin refuses to clip gradients when the optimizer
-        declares it handles unscaling internally (fused=True).  When fused is
-        active we are on BF16 (no GradScaler) so ``clip_grad_norm_`` is
-        correct.  For the non-fused path (FP16 + GradScaler or FP32) we
-        delegate to ``super()`` to preserve scaler-aware unscaling.
+        PTL's AMP precision plugin refuses to clip gradients when the optimizer declares it handles unscaling internally
+        (fused=True).  When fused is active we are on BF16 (no GradScaler) so ``clip_grad_norm_`` is correct.  For the
+        non-fused path (FP16 + GradScaler or FP32) we delegate to ``super()`` to preserve scaler-aware unscaling.
 
         Args:
             optimizer: The current optimizer.
@@ -280,8 +302,7 @@ class RFDETRModelModule(LightningModule):
             gradient_clip_algorithm: Clipping algorithm; forwarded to super()
                 for the non-fused path.
         """
-        use_fused = self.model_config.fused_optimizer and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-        if use_fused:
+        if self._use_fused_optimizer:
             if gradient_clip_val and gradient_clip_val > 0:
                 torch.nn.utils.clip_grad_norm_(self.parameters(), gradient_clip_val)
         else:
@@ -294,9 +315,9 @@ class RFDETRModelModule(LightningModule):
     def test_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
         """Run forward pass and postprocess for one test step.
 
-        Mirrors :meth:`validation_step` so ``COCOEvalCallback`` can accumulate
-        results via ``on_test_batch_end`` when ``trainer.test()`` is called (e.g.
-        from :class:`~rfdetr.training.callbacks.BestModelCallback` at end of training).
+        Mirrors :meth:`validation_step` so ``COCOEvalCallback`` can accumulate results via ``on_test_batch_end`` when
+        ``trainer.test()`` is called (e.g. from :class:`~rfdetr.training.callbacks.BestModelCallback` at end of
+        training).
 
         Args:
             batch: Tuple of (NestedTensor samples, list of target dicts).
@@ -335,23 +356,31 @@ class RFDETRModelModule(LightningModule):
         return self.postprocess(outputs, orig_sizes)
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Auto-detect and normalise legacy ``.pth`` checkpoints at load time.
+        """Auto-detect legacy formats and reconcile PE shapes at checkpoint load time.
 
-        PTL calls this hook before applying ``checkpoint["state_dict"]`` to
-        the module.  Two legacy formats are handled:
+        PTL calls this hook before applying ``checkpoint["state_dict"]`` to the module.  Three normalisation steps are
+        applied in order:
 
         1. **Raw legacy format** — a ``*.pth`` file loaded directly by
-           ``Trainer`` (e.g. via ``ckpt_path=``).  Recognised by the presence
-           of ``"model"`` without ``"state_dict"``.  The state dict is
-           rewritten in-place with the ``"model."`` prefix so PTL can apply it
-           normally.
+           ``Trainer`` (e.g. via ``ckpt_path=``).  Recognised by the presence of ``"model"`` without ``"state_dict"``.
+           The state dict is rewritten in-place with the ``"model."`` prefix so PTL can apply it normally.
 
-        2. **Converted format** — a file produced by
-           :func:`~rfdetr.training.checkpoint.convert_legacy_checkpoint` that
-           already has ``"state_dict"`` but also carries
-           ``"legacy_ema_state_dict"``.  The EMA weights are stashed on
-           ``self._pending_legacy_ema_state`` for optional restoration by
-           :class:`~rfdetr.training.callbacks.ema.RFDETREMACallback`.
+        2. **Positional-embedding interpolation** — when the checkpoint was
+           saved at a different image resolution than the current model, the DINOv2 ``position_embeddings`` tensor shape
+           will mismatch. :func:`~rfdetr.models.weights.interpolate_position_embeddings` is called to bicubic-resize the
+           PE to ``model_config.positional_encoding_size`` before PTL applies the state dict.  Regression fix for
+           :issue:`998`.
+
+        3. **Converted format** — a file produced by
+           :func:`~rfdetr.training.checkpoint.convert_legacy_checkpoint` that already has ``"state_dict"`` but also
+           carries ``"legacy_ema_state_dict"``.  The EMA weights are stashed on ``self._pending_legacy_ema_state`` for
+           optional restoration by :class:`~rfdetr.training.callbacks.ema.RFDETREMACallback`.
+
+        Note:
+            This hook only fires on ``Trainer(ckpt_path=...)`` resume paths. Fresh-train bootstrap from a
+            ``pretrain_weights`` checkpoint runs through :func:`~rfdetr.models.weights.load_pretrain_weights` during
+            ``__init__`` instead — that helper performs its own PTL ``.ckpt`` normalisation (``state_dict`` → ``model``
+            key, ``_orig_mod`` strip) and PE interpolation, so the two code paths intentionally do not share state.
 
         Args:
             checkpoint: Checkpoint dict passed in by PTL (mutated in-place).
@@ -359,6 +388,16 @@ class RFDETRModelModule(LightningModule):
         # Raw legacy .pth: no "state_dict" key — build it from "model".
         if "model" in checkpoint and "state_dict" not in checkpoint:
             checkpoint["state_dict"] = {"model." + k: v for k, v in checkpoint["model"].items()}
+
+        # Interpolate DINOv2 positional embeddings when the checkpoint was saved
+        # at a different resolution than the current model.  PTL applies
+        # checkpoint["state_dict"] immediately after this hook, so the shapes
+        # must already match at this point.  Regression: #998.
+        if "state_dict" in checkpoint:
+            interpolate_position_embeddings(
+                checkpoint["state_dict"],
+                self.model_config.positional_encoding_size,
+            )
 
         # Stash legacy EMA weights for RFDETREMACallback.setup(), which restores
         # them into AveragedModel when resuming from converted legacy checkpoints.

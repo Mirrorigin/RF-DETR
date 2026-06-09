@@ -15,14 +15,11 @@
 # Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
-
-"""
-Modules to compute the matching cost and solve the corresponding LSAP.
-"""
+"""Modules to compute the matching cost and solve the corresponding LSAP."""
 
 import numpy as np
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 
@@ -35,10 +32,11 @@ _SANITIZED_COST_MARGIN = 1.0
 
 
 class HungarianMatcher(nn.Module):
-    """This class computes an assignment between the targets and the predictions of the network
-    For efficiency reasons, the targets don't include the no_object. Because of this, in general,
-    there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
-    while the others are un-matched (and thus treated as non-objects).
+    """This class computes an assignment between the targets and the predictions of the network For efficiency reasons,
+    the targets don't include the no_object.
+
+    Because of this, in general, there are more predictions than targets. In this case, we do a 1-to-1 matching of the
+    best predictions, while the others are un-matched (and thus treated as non-objects).
     """
 
     def __init__(
@@ -78,7 +76,7 @@ class HungarianMatcher(nn.Module):
         self._warned_non_finite_costs = False
 
     @staticmethod
-    def _sanitize_cost_matrix(C: torch.Tensor) -> torch.Tensor:
+    def _sanitize_cost_matrix(cost_matrix: torch.Tensor) -> torch.Tensor:
         """Replace non-finite cost entries with a large finite sentinel.
 
         >>> HungarianMatcher._sanitize_cost_matrix(
@@ -87,35 +85,35 @@ class HungarianMatcher(nn.Module):
         [[1.0, 4.0], [4.0, -2.0]]
 
         Args:
-            C: Cost matrix to sanitize before Hungarian assignment.
+            cost_matrix: Cost matrix to sanitize before Hungarian assignment.
 
         Returns:
-            Cost matrix with all non-finite entries replaced by a finite
-            sentinel that is no smaller than any valid entry.
+            Cost matrix with all non-finite entries replaced by a finite sentinel that is no smaller than any valid
+            entry.
         """
-        finite_mask = torch.isfinite(C)
+        finite_mask = torch.isfinite(cost_matrix)
         if finite_mask.all():
-            return C
+            return cost_matrix
 
-        dtype_info = torch.finfo(C.dtype)
+        dtype_info = torch.finfo(cost_matrix.dtype)
         if finite_mask.any():
-            finite_costs = C[finite_mask]
+            finite_costs = cost_matrix[finite_mask]
             max_cost = finite_costs.max()
             # Add the largest absolute finite cost so the replacement stays
             # strictly larger than every valid entry, even if all costs are negative.
             replacement_cost = max_cost + finite_costs.abs().max() + _SANITIZED_COST_MARGIN
             # Guard against overflow to inf/NaN and clamp to the maximum finite value.
             if not torch.isfinite(replacement_cost):
-                replacement_cost = C.new_tensor(dtype_info.max)
+                replacement_cost = cost_matrix.new_tensor(dtype_info.max)
             else:
                 replacement_cost = torch.clamp(replacement_cost, max=dtype_info.max)
         else:
             # If all entries are non-finite, fall back to a large finite sentinel.
-            replacement_cost = C.new_tensor(dtype_info.max)
+            replacement_cost = cost_matrix.new_tensor(dtype_info.max)
 
-        sanitized_C = C.clone()
-        sanitized_C[~finite_mask] = replacement_cost
-        return sanitized_C
+        sanitized_cost_matrix = cost_matrix.clone()
+        sanitized_cost_matrix[~finite_mask] = replacement_cost
+        return sanitized_cost_matrix
 
     @torch.no_grad()
     def forward(self, outputs, targets, group_detr=1):
@@ -127,9 +125,10 @@ class HungarianMatcher(nn.Module):
             targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
                  "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
                            objects in the target) containing the class labels
-                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates
-                 "masks": Tensor of dim [num_target_boxes, H, W] containing the target mask coordinates
+                 "boxes": Tensor of dim [num_target_boxes, 4] containing the target box coordinates "masks": Tensor of
+                 dim [num_target_boxes, H, W] containing the target mask coordinates
             group_detr: Number of groups used for matching.
+
         Returns:
             A list of size batch_size, containing tuples of (index_i, index_j) where:
                 - index_i is the indices of the selected predictions (in order)
@@ -209,14 +208,16 @@ class HungarianMatcher(nn.Module):
             cost_mask_dice = batch_dice_loss(pred_masks_logits, tgt_masks_flat)
 
         # Final cost matrix
-        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+        cost_matrix = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         if masks_present:
-            C = C + self.cost_mask_ce * cost_mask_ce + self.cost_mask_dice * cost_mask_dice
-        C = C.view(bs, num_queries, -1).float().cpu()  # convert to float because bfloat16 doesn't play nicely with CPU
+            cost_matrix = cost_matrix + self.cost_mask_ce * cost_mask_ce + self.cost_mask_dice * cost_mask_dice
+        cost_matrix = (
+            cost_matrix.view(bs, num_queries, -1).float().cpu()
+        )  # convert to float because bfloat16 doesn't play nicely with CPU
 
         # We assume any good match will not cause NaN or Inf, so replace invalid
         # entries with a finite value that is larger than every valid cost.
-        finite_mask = torch.isfinite(C)
+        finite_mask = torch.isfinite(cost_matrix)
         if not finite_mask.all():
             if not self._warned_non_finite_costs:
                 logger.warning(
@@ -225,15 +226,15 @@ class HungarianMatcher(nn.Module):
                     "Check for numerical instability."
                 )
                 self._warned_non_finite_costs = True
-            C = self._sanitize_cost_matrix(C)
+            cost_matrix = self._sanitize_cost_matrix(cost_matrix)
 
         sizes = [len(v["boxes"]) for v in targets]
         indices = []
         g_num_queries = num_queries // group_detr
-        C_list = C.split(g_num_queries, dim=1)
+        cost_matrix_list = cost_matrix.split(g_num_queries, dim=1)
         for g_i in range(group_detr):
-            C_g = C_list[g_i]
-            indices_g = [linear_sum_assignment(c[i]) for i, c in enumerate(C_g.split(sizes, -1))]
+            grouped_cost_matrix = cost_matrix_list[g_i]
+            indices_g = [linear_sum_assignment(c[i]) for i, c in enumerate(grouped_cost_matrix.split(sizes, -1))]
             if g_i == 0:
                 indices = indices_g
             else:

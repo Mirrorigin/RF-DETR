@@ -12,10 +12,7 @@
 # Copied from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # ------------------------------------------------------------------------
-
-"""
-Various positional encodings for the transformer.
-"""
+"""Various positional encodings for the transformer."""
 
 import math
 
@@ -26,10 +23,8 @@ from rfdetr.utilities.tensors import NestedTensor
 
 
 class PositionEmbeddingSine(nn.Module):
-    """
-    This is a more standard version of the position embedding, very similar to the one
-    used by the Attention is all you need paper, generalized to work on images.
-    """
+    """This is a more standard version of the position embedding, very similar to the one used by the Attention is all
+    you need paper, generalized to work on images."""
 
     def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
         super().__init__()
@@ -102,9 +97,7 @@ class PositionEmbeddingSine(nn.Module):
 
 
 class PositionEmbeddingLearned(nn.Module):
-    """
-    Absolute pos embedding, learned.
-    """
+    """Absolute pos embedding, learned."""
 
     def __init__(self, num_pos_feats=256):
         super().__init__()
@@ -143,12 +136,12 @@ class PositionEmbeddingLearned(nn.Module):
 
 
 def build_position_encoding(hidden_dim, position_embedding):
-    N_steps = hidden_dim // 2
+    num_steps = hidden_dim // 2
     if position_embedding in ("v2", "sine"):
         # TODO find a better way of exposing other arguments
-        position_embedding = PositionEmbeddingSine(N_steps, normalize=True)
+        position_embedding = PositionEmbeddingSine(num_steps, normalize=True)
     elif position_embedding in ("v3", "learned"):
-        position_embedding = PositionEmbeddingLearned(N_steps)
+        position_embedding = PositionEmbeddingLearned(num_steps)
     else:
         raise ValueError(f"not supported {position_embedding}")
 

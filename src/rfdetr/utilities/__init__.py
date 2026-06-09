@@ -3,7 +3,6 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
 """Utility functions and helpers."""
 
 from rfdetr.utilities import box_ops
@@ -23,6 +22,7 @@ from rfdetr.utilities.state_dict import clean_state_dict, strip_checkpoint
 from rfdetr.utilities.tensors import (
     NestedTensor,
     collate_fn,
+    make_collate_fn,
     nested_tensor_from_tensor_list,
 )
 
@@ -38,6 +38,7 @@ __all__ = [
     # tensors
     "NestedTensor",
     "collate_fn",
+    "make_collate_fn",
     "nested_tensor_from_tensor_list",
     # box_ops (submodule)
     "box_ops",

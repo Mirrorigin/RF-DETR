@@ -14,16 +14,14 @@
 # Copied from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # ------------------------------------------------------------------------
-
 """Deprecated: most symbols have moved to ``rfdetr.utilities``.
 
-``accuracy``, ``inverse_sigmoid``, and ``interpolate`` now live in
-``rfdetr.models.math`` and are re-exported here for backward compatibility.
-"""
+``accuracy``, ``inverse_sigmoid``, and ``interpolate`` now live in ``rfdetr.models.math`` and are re-exported here for
+backward compatibility."""
 
 from rfdetr.utilities.decorators import _warn_deprecated_module
 
-_warn_deprecated_module("rfdetr.util.misc", "rfdetr.utilities")
+_warn_deprecated_module("rfdetr.util.misc", "rfdetr.utilities", deprecated_in="1.6.0", remove_in="1.9.0")
 
 # Re-export symbols that have moved to utilities/.
 # Re-export math functions from their canonical location in rfdetr.models.math.
@@ -42,5 +40,6 @@ from rfdetr.utilities.state_dict import strip_checkpoint  # noqa: F401, E402
 from rfdetr.utilities.tensors import (  # noqa: E402, F401
     NestedTensor,
     collate_fn,
+    make_collate_fn,
     nested_tensor_from_tensor_list,
 )

@@ -9,12 +9,13 @@ Thank you for helping to advance RF-DETR! Your participation is invaluable in ev
 3. [Development Environment Setup](#development-environment-setup)
 4. [Test-Driven Development](#test-driven-development)
 5. [Code Quality and Linting](#code-quality-and-linting)
-6. [Building Documentation](#building-documentation)
-7. [CLA Signing](#cla-signing)
-8. [Google-Style Docstrings and Mandatory Type Hints](#google-style-docstrings-and-mandatory-type-hints)
-9. [Reporting Bugs](#reporting-bugs)
-10. [Adding a New Model](#adding-a-new-model)
-11. [License](#license)
+6. [Deprecation Policy](#deprecation-policy)
+7. [Building Documentation](#building-documentation)
+8. [CLA Signing](#cla-signing)
+9. [Google-Style Docstrings and Mandatory Type Hints](#google-style-docstrings-and-mandatory-type-hints)
+10. [Reporting Bugs](#reporting-bugs)
+11. [Adding a New Model](#adding-a-new-model)
+12. [License](#license)
 
 ## How to Contribute
 
@@ -101,7 +102,7 @@ rf-detr/
 
 - **`.pre-commit-config.yaml`** - Defines pre-commit hooks for code quality
 
-- **`mkdocs.yml`** - Documentation site configuration
+- **`mkdocs.yaml`** - Documentation site configuration
 
 > [!TIP]
 > When contributing, focus on the relevant directory for your change:
@@ -143,11 +144,11 @@ uv sync --group build      # Build tools only
 > **CI Workflows as Source of Truth:** See `.github/workflows/ci-tests-cpu.yml` and `.github/workflows/ci-tests-gpu.yml` for the exact commands used in continuous integration.
 
 ```bash
-# Run CPU tests (default for local development)
-uv run --no-sync pytest src/ tests/ -n 2 -m "not gpu" --cov=rfdetr --cov-report=xml
+# Run CPU tests (default for local development; mirrors CI)
+uv run --no-sync pytest src/ tests/ -n 2 -m "not gpu" --ignore=tests/try_instantiate_all_models.py --cov=rfdetr --cov-report=xml --timeout=240 --durations=50
 
-# Run GPU tests (requires GPU)
-uv run --no-sync pytest src/ tests/ -n 2 -m gpu
+# Run GPU tests (requires GPU; mirrors CI)
+uv run --no-sync pytest tests/ -m gpu -n 3 --reruns 1 --only-rerun "OutOfMemoryError" --cov=rfdetr --cov-report=xml --timeout=600 --durations=20
 ```
 
 **Development vs. PR Requirements:**
@@ -283,13 +284,13 @@ This ensures your changes work across all supported platforms and Python version
 
 ```bash
 # Run tests with parallel execution (recommended)
-uv run --no-sync pytest src/ tests/ -n 2 -m "not gpu"
+uv run --no-sync pytest src/ tests/ -n 2 -m "not gpu" --ignore=tests/try_instantiate_all_models.py --timeout=240 --durations=50
 
 # Run a specific test file
-uv run --no-sync pytest tests/test_model.py
+uv run --no-sync pytest tests/models/test_model.py
 
 # Run a specific test
-uv run --no-sync pytest tests/test_model.py::test_model_loading
+uv run --no-sync pytest tests/models/test_model.py::test_model_loading
 ```
 
 ## Code Quality and Linting
@@ -313,6 +314,32 @@ pre-commit run --all-files
 ```
 
 **Configuration:** See `.pre-commit-config.yaml` for all hooks and `pyproject.toml` for tool-specific settings (e.g., `[tool.ruff]`).
+
+## Deprecation Policy
+
+RF-DETR uses [pyDeprecate](https://github.com/Borda/pyDeprecate) to emit structured deprecation warnings. Use `@deprecated` for functions and methods, `@deprecated_class` for classes. The importable package name is `deprecate` (not `pyDeprecate`); refer to its docs for advanced usage.
+
+```python
+from deprecate import deprecated
+
+
+@deprecated(target=new_fn, deprecated_in="1.7.0", remove_in="1.9.0")
+def old_fn(*args, **kwargs): ...
+```
+
+**Rules:**
+
+- All version strings must be full semver: `1.7.0`, not `1.7`.
+- Minimum window: a symbol deprecated in `X.Y.0` cannot be removed before `X.(Y+2).0` (two minor releases).
+- Every new deprecation needs an entry in `docs/getting-started/migration.md` under a `### Deprecated (removal in vX.Z.0)` subsection.
+
+**Removal checklist** (when `remove_in` version arrives):
+
+1. Delete the deprecated symbol, class, or shim file.
+2. Remove any remaining `@deprecated` / `@deprecated_class` decorators.
+3. Add a breaking-change entry to `docs/getting-started/migration.md`.
+4. Search for lingering imports of the removed symbol and update them.
+5. Verify `pre-commit run --all-files` passes and tests are green.
 
 ## Building Documentation
 

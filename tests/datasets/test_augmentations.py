@@ -3,10 +3,11 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
 """Tests for Albumentations augmentation wrappers."""
 
-import albumentations as A
+from unittest import mock
+
+import albumentations as alb
 import numpy as np
 import pytest
 import torch
@@ -21,14 +22,33 @@ from rfdetr.datasets.transforms import AlbumentationsWrapper, _build_albu_transf
 from rfdetr.utilities import collate_fn
 
 
+class _FakeRandomSizedCropV2:
+    """Test double for Albumentations 2.x-style RandomSizedCrop API."""
+
+    def __init__(self, *, min_max_height, size, p=1.0):
+        self.min_max_height = min_max_height
+        self.size = size
+        self.p = p
+
+
+class _FakeRandomSizedCropV1:
+    """Test double for Albumentations 1.x-style RandomSizedCrop API."""
+
+    def __init__(self, *, min_max_height, height, width, p=1.0):
+        self.min_max_height = min_max_height
+        self.height = height
+        self.width = width
+        self.p = p
+
+
 class TestAlbumentationsWrapper:
     """Tests for AlbumentationsWrapper class."""
 
     @pytest.mark.parametrize(
         "transform_class,params,box_in,box_out",
         [
-            (A.HorizontalFlip, {"p": 1.0}, [10.0, 20.0, 30.0, 40.0], [70.0, 20.0, 90.0, 40.0]),
-            (A.VerticalFlip, {"p": 1.0}, [10.0, 20.0, 30.0, 40.0], [10.0, 60.0, 30.0, 80.0]),
+            (alb.HorizontalFlip, {"p": 1.0}, [10.0, 20.0, 30.0, 40.0], [70.0, 20.0, 90.0, 40.0]),
+            (alb.VerticalFlip, {"p": 1.0}, [10.0, 20.0, 30.0, 40.0], [10.0, 60.0, 30.0, 80.0]),
         ],
     )
     def test_flip_transforms_with_boxes(self, transform_class, params, box_in, box_out):
@@ -47,7 +67,7 @@ class TestAlbumentationsWrapper:
 
     def test_non_geometric_transform_preserves_boxes(self):
         """Test that non-geometric transforms preserve bounding boxes."""
-        transform = A.GaussianBlur(blur_limit=3, p=1.0)
+        transform = alb.GaussianBlur(blur_limit=3, p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -62,7 +82,7 @@ class TestAlbumentationsWrapper:
 
     def test_empty_boxes_handling(self):
         """Test wrapper handles empty boxes correctly."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -76,7 +96,7 @@ class TestAlbumentationsWrapper:
 
     def test_multiple_boxes(self):
         """Test wrapper handles multiple bounding boxes."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -99,7 +119,7 @@ class TestAlbumentationsWrapper:
 
     def test_none_target_inference_mode(self):
         """Test wrapper accepts None target for inference (no ground-truth annotations)."""
-        transform = A.Resize(height=64, width=64)
+        transform = alb.Resize(height=64, width=64)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -111,7 +131,7 @@ class TestAlbumentationsWrapper:
 
     def test_invalid_target_type(self):
         """Test wrapper raises error for invalid target type."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -121,7 +141,7 @@ class TestAlbumentationsWrapper:
 
     def test_missing_labels_key(self):
         """Test wrapper raises error when labels key is missing."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -132,7 +152,7 @@ class TestAlbumentationsWrapper:
 
     def test_invalid_boxes_shape(self):
         """Test wrapper raises error for invalid boxes shape."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (100, 100))
@@ -147,12 +167,11 @@ class TestAlbumentationsWrapper:
     def test_orig_size_preserved_with_two_boxes(self):
         """Test that orig_size is not treated as per-instance field when num_boxes=2.
 
-        Regression test for bug where orig_size (shape [2] for [h, w]) was incorrectly
-        treated as a per-instance field when there were exactly 2 boxes, causing
-        orig_size to be filtered/indexed incorrectly and leading to inconsistent
-        tensor shapes in batches.
+        Regression test for bug where orig_size (shape [2] for [h, w]) was incorrectly treated as a per-instance field
+        when there were exactly 2 boxes, causing orig_size to be filtered/indexed incorrectly and leading to
+        inconsistent tensor shapes in batches.
         """
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (640, 480))
@@ -182,12 +201,12 @@ class TestAlbumentationsWrapper:
     def test_orig_size_preserved_with_two_boxes_and_masks(self):
         """Test that orig_size and masks are handled correctly when num_boxes=2.
 
-        Critical regression test: With 2 boxes, both orig_size and masks have
-        first dimension = 2, but they must be treated differently:
+        Critical regression test: With 2 boxes, both orig_size and masks have first dimension = 2, but they must be
+        treated differently:
         - orig_size (shape [2]): global field, should NOT be filtered
         - masks (shape [2, H, W]): per-instance field, SHOULD be transformed
         """
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         image = Image.new("RGB", (640, 480))
@@ -238,9 +257,9 @@ class TestAlbumentationsWrapper:
     @pytest.mark.parametrize(
         "transform_class,params",
         [
-            (A.HorizontalFlip, {"p": 1.0}),
-            (A.VerticalFlip, {"p": 1.0}),
-            (A.Rotate, {"limit": 45, "p": 1.0}),
+            (alb.HorizontalFlip, {"p": 1.0}),
+            (alb.VerticalFlip, {"p": 1.0}),
+            (alb.Rotate, {"limit": 45, "p": 1.0}),
         ],
     )
     def test_various_geometric_transforms(self, transform_class, params):
@@ -261,7 +280,7 @@ class TestAlbumentationsWrapper:
 
     def test_masks_transform_with_horizontal_flip(self):
         """Masks should be transformed consistently with boxes for geometric transforms."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         # Create test image (100x100)
@@ -305,9 +324,9 @@ class TestAlbumentationsWrapper:
     @pytest.mark.parametrize(
         "transform_class,params",
         [
-            (A.HorizontalFlip, {"p": 1.0}),
-            (A.VerticalFlip, {"p": 1.0}),
-            (A.Rotate, {"limit": 15, "p": 1.0}),  # Small angle to avoid boxes going out
+            (alb.HorizontalFlip, {"p": 1.0}),
+            (alb.VerticalFlip, {"p": 1.0}),
+            (alb.Rotate, {"limit": 15, "p": 1.0}),  # Small angle to avoid boxes going out
         ],
     )
     def test_various_geometric_transforms_with_masks(self, transform_class, params):
@@ -341,9 +360,9 @@ class TestAlbumentationsWrapper:
     @pytest.mark.parametrize(
         "transform_class,params",
         [
-            (A.GaussianBlur, {"blur_limit": 3, "p": 1.0}),
-            (A.RandomBrightnessContrast, {"p": 1.0}),
-            (A.GaussNoise, {"p": 1.0}),
+            (alb.GaussianBlur, {"blur_limit": 3, "p": 1.0}),
+            (alb.RandomBrightnessContrast, {"p": 1.0}),
+            (alb.GaussNoise, {"p": 1.0}),
         ],
     )
     def test_pixel_transforms_preserve_masks(self, transform_class, params):
@@ -371,7 +390,7 @@ class TestAlbumentationsWrapper:
 
     def test_multiple_masks_with_geometric_transform(self):
         """Test multiple masks are correctly transformed together."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -401,7 +420,7 @@ class TestAlbumentationsWrapper:
 
     def test_empty_masks_handling(self):
         """Test wrapper correctly handles empty masks (no 'masks' key when empty)."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -422,11 +441,10 @@ class TestAlbumentationsWrapper:
     def test_geometric_transform_with_empty_masks_tensor(self):
         """Test that a geometric transform does not crash when masks tensor is empty (0 instances).
 
-        Regression test for: when a prior crop removes all annotations, target["masks"]
-        has shape (0, H, W). Passing an empty list to albumentations raises
-        ValueError: masks cannot be empty.
+        Regression test for: when a prior crop removes all annotations, target["masks"] has shape (0, H, W). Passing an
+        empty list to albumentations raises ValueError: masks cannot be empty.
         """
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -453,7 +471,7 @@ class TestAlbumentationsWrapper:
     def test_pixel_transform_with_masks_no_boxes(self):
         """Test that pixel transforms work with masks but no boxes."""
         # Use a non-geometric transform which doesn't need boxes
-        transform = A.GaussianBlur(blur_limit=3, p=1.0)
+        transform = alb.GaussianBlur(blur_limit=3, p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -474,7 +492,7 @@ class TestAlbumentationsWrapper:
 
     def test_invalid_mask_shape_raises_error(self):
         """Test that invalid mask shape raises ValueError."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -493,7 +511,7 @@ class TestAlbumentationsWrapper:
     @pytest.mark.parametrize("mask_dtype", [torch.uint8, torch.float32])
     def test_mask_dtype_handling(self, mask_dtype):
         """Test wrapper handles different mask dtypes correctly (uint8, float32)."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -521,7 +539,7 @@ class TestAlbumentationsWrapper:
         # Original image 100x100
         # Box 1: [10, 10, 20, 20] (will be kept if we crop top-left)
         # Box 2: [80, 80, 90, 90] (will be dropped if we crop top-left to 50x50)
-        transform = A.Crop(x_min=0, y_min=0, x_max=50, y_max=50, p=1.0)
+        transform = alb.Crop(x_min=0, y_min=0, x_max=50, y_max=50, p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         height, width = 100, 100
@@ -549,12 +567,11 @@ class TestAlbumentationsWrapper:
     def test_degenerate_bbox_at_image_boundary_is_silently_dropped(self):
         """Degenerate boxes (x_min == x_max or y_min == y_max) must not raise ValueError.
 
-        Regression test: COCO annotations sometimes place a box exactly on the image
-        boundary so that both x coordinates equal the image width (normalized: 1.0).
-        Albumentations' check_bboxes rejects these with
-        "x_max is less than or equal to x_min", crashing the DataLoader worker.
+        Regression test: COCO annotations sometimes place a box exactly on the image boundary so that both x coordinates
+        equal the image width (normalized: 1.0). Albumentations' check_bboxes rejects these with "x_max is less than or
+        equal to x_min", crashing the DataLoader worker.
         """
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         width, height = 100, 100
@@ -585,7 +602,7 @@ class TestAlbumentationsWrapper:
 
     def test_degenerate_bbox_mixed_with_masks(self):
         """Degenerate boxes are dropped together with their corresponding masks."""
-        transform = A.HorizontalFlip(p=1.0)
+        transform = alb.HorizontalFlip(p=1.0)
         wrapper = AlbumentationsWrapper(transform)
 
         width, height = 100, 100
@@ -731,13 +748,8 @@ class TestRandomSizedCropCompat:
             ),
         ],
     )
-    def test_errors_on_partial_hw_with_v2_api(self, monkeypatch, params, expected_missing):
-        class FakeV2:
-            def __init__(self, *, min_max_height, size, p=1.0):
-                pass
-
-        monkeypatch.setattr("rfdetr.datasets.transforms.A.RandomSizedCrop", FakeV2)
-
+    @mock.patch("rfdetr.datasets.transforms.alb.RandomSizedCrop", new=_FakeRandomSizedCropV2)
+    def test_errors_on_partial_hw_with_v2_api(self, params, expected_missing):
         with pytest.raises(ValueError, match=f"missing '{expected_missing}'"):
             _build_albu_transform("RandomSizedCrop", params)
 
@@ -763,25 +775,14 @@ class TestRandomSizedCropCompat:
             ),
         ],
     )
-    def test_size_takes_precedence_over_hw_on_v2_api(self, monkeypatch, params):
-        class FakeV2:
-            def __init__(self, *, min_max_height, size, p=1.0):
-                self.size = size
-
-        monkeypatch.setattr("rfdetr.datasets.transforms.A.RandomSizedCrop", FakeV2)
-
+    @mock.patch("rfdetr.datasets.transforms.alb.RandomSizedCrop", new=_FakeRandomSizedCropV2)
+    def test_size_takes_precedence_over_hw_on_v2_api(self, params):
         # No TypeError means height/width were correctly dropped before instantiation
         transform = _build_albu_transform("RandomSizedCrop", params)
         assert transform.size == (256, 256)
 
-    def test_scalar_size_passes_through_on_v1_legacy_path(self, monkeypatch):
-        class FakeV1:
-            def __init__(self, *, min_max_height, height, width, p=1.0):
-                self.height = height
-                self.width = width
-
-        monkeypatch.setattr("rfdetr.datasets.transforms.A.RandomSizedCrop", FakeV1)
-
+    @mock.patch("rfdetr.datasets.transforms.alb.RandomSizedCrop", new=_FakeRandomSizedCropV1)
+    def test_scalar_size_passes_through_on_v1_legacy_path(self):
         # Scalar size=640 does not match isinstance(size, Sequence), so the v1
         # legacy branch leaves it in the params dict. FakeV1 does not accept
         # ``size`` so this should raise a TypeError from the constructor — our
@@ -792,61 +793,40 @@ class TestRandomSizedCropCompat:
                 {"min_max_height": [100, 200], "size": 640},
             )
 
-    def test_adapts_height_width_for_v2_api(self, monkeypatch):
+    @mock.patch("rfdetr.datasets.transforms.alb.RandomSizedCrop", new=_FakeRandomSizedCropV2)
+    def test_adapts_height_width_for_v2_api(self):
         """RandomSizedCrop config with height/width is adapted to the Albumentations 2.x size API."""
-
-        class FakeV2:
-            def __init__(self, *, min_max_height, size, p=1.0):
-                self.min_max_height = min_max_height
-                self.size = size
-                self.p = p
-
-        monkeypatch.setattr("rfdetr.datasets.transforms.A.RandomSizedCrop", FakeV2)
 
         transform = _build_albu_transform(
             "RandomSizedCrop",
             {"min_max_height": [384, 600], "height": 640, "width": 640},
         )
 
-        assert isinstance(transform, FakeV2)
+        assert isinstance(transform, _FakeRandomSizedCropV2)
         assert transform.min_max_height == [384, 600]
         assert transform.size == (640, 640)
 
-    def test_adapts_size_for_v1_api(self, monkeypatch):
+    @mock.patch("rfdetr.datasets.transforms.alb.RandomSizedCrop", new=_FakeRandomSizedCropV1)
+    def test_adapts_size_for_v1_api(self):
         """RandomSizedCrop config with size is adapted to the Albumentations 1.x height/width API."""
-
-        class FakeV1:
-            def __init__(self, *, min_max_height, height, width, p=1.0):
-                self.min_max_height = min_max_height
-                self.height = height
-                self.width = width
-                self.p = p
-
-        monkeypatch.setattr("rfdetr.datasets.transforms.A.RandomSizedCrop", FakeV1)
 
         transform = _build_albu_transform(
             "RandomSizedCrop",
             {"min_max_height": [384, 600], "size": (640, 640)},
         )
 
-        assert isinstance(transform, FakeV1)
+        assert isinstance(transform, _FakeRandomSizedCropV1)
         assert transform.min_max_height == [384, 600]
         assert transform.height == 640
         assert transform.width == 640
 
-    def test_from_config_partial_height_is_silently_skipped(self, monkeypatch):
+    @mock.patch("rfdetr.datasets.transforms.alb.RandomSizedCrop", new=_FakeRandomSizedCropV2)
+    def test_from_config_partial_height_is_silently_skipped(self):
         """from_config swallows the ValueError for partial height-only config and skips the transform.
 
-        This documents the intentional silent-skip behavior: from_config wraps
-        _build_albu_transform in a broad except clause so bad configs produce a
-        warning rather than an exception.
+        This documents the intentional silent-skip behavior: from_config wraps _build_albu_transform in a broad except
+        clause so bad configs produce a warning rather than an exception.
         """
-
-        class FakeV2:
-            def __init__(self, *, min_max_height, size, p=1.0):
-                pass
-
-        monkeypatch.setattr("rfdetr.datasets.transforms.A.RandomSizedCrop", FakeV2)
 
         config = {
             "HorizontalFlip": {"p": 0.5},
@@ -866,17 +846,17 @@ class TestAlbumentationsWrapperNestedConfig:
 
     def test_one_of_geometric_detection(self):
         """OneOf containing a geometric transform is treated as geometric."""
-        wrapper = AlbumentationsWrapper(A.OneOf([A.HorizontalFlip(p=1.0), A.GaussianBlur(p=1.0)]))
+        wrapper = AlbumentationsWrapper(alb.OneOf([alb.HorizontalFlip(p=1.0), alb.GaussianBlur(p=1.0)]))
         assert wrapper._is_geometric is True
 
     def test_one_of_pixel_detection(self):
         """OneOf containing only pixel transforms is treated as pixel-level."""
-        wrapper = AlbumentationsWrapper(A.OneOf([A.GaussianBlur(p=1.0), A.Blur(p=1.0)]))
+        wrapper = AlbumentationsWrapper(alb.OneOf([alb.GaussianBlur(p=1.0), alb.Blur(p=1.0)]))
         assert wrapper._is_geometric is False
 
     def test_sequential_geometric_detection(self):
         """Sequential containing a geometric transform is treated as geometric."""
-        wrapper = AlbumentationsWrapper(A.Sequential([A.Rotate(limit=45, p=1.0), A.GaussianBlur(p=1.0)]))
+        wrapper = AlbumentationsWrapper(alb.Sequential([alb.Rotate(limit=45, p=1.0), alb.GaussianBlur(p=1.0)]))
         assert wrapper._is_geometric is True
 
     def test_from_config_nested_one_of(self):
@@ -897,7 +877,7 @@ class TestAlbumentationsWrapperNestedConfig:
         assert wrapper._is_geometric is True
         # The inner Albumentations transform should be OneOf
         inner = wrapper.transform.transforms[0]
-        assert isinstance(inner, A.OneOf)
+        assert isinstance(inner, alb.OneOf)
         assert len(inner.transforms) == 2
 
     def test_from_config_nested_one_of_pixel_only(self):
@@ -937,8 +917,8 @@ class TestAlbumentationsWrapperNestedConfig:
         assert len(transforms) == 1
         assert transforms[0]._is_geometric is True
         inner = transforms[0].transform.transforms[0]
-        assert isinstance(inner, A.Sequential)
-        assert isinstance(inner.transforms[0], A.OneOf)
+        assert isinstance(inner, alb.Sequential)
+        assert isinstance(inner.transforms[0], alb.OneOf)
 
     def test_from_config_shorthand_list(self):
         """from_config supports shorthand {OneOf: [...]} without explicit transforms key."""
@@ -952,7 +932,7 @@ class TestAlbumentationsWrapperNestedConfig:
 
         assert len(transforms) == 1
         inner = transforms[0].transform.transforms[0]
-        assert isinstance(inner, A.OneOf)
+        assert isinstance(inner, alb.OneOf)
         assert len(inner.transforms) == 2
 
     def test_from_config_nested_sequential(self):
@@ -969,7 +949,7 @@ class TestAlbumentationsWrapperNestedConfig:
 
         assert len(transforms) == 1
         inner = transforms[0].transform.transforms[0]
-        assert isinstance(inner, A.Sequential)
+        assert isinstance(inner, alb.Sequential)
         assert len(inner.transforms) == 2
 
     def test_from_config_list_format(self):
@@ -989,7 +969,7 @@ class TestAlbumentationsWrapperNestedConfig:
 
         assert len(transforms) == 2
         assert isinstance(transforms[0], AlbumentationsWrapper)
-        assert isinstance(transforms[1].transform.transforms[0], A.OneOf)
+        assert isinstance(transforms[1].transform.transforms[0], alb.OneOf)
 
     def test_from_config_mixed_flat_and_nested(self):
         """from_config handles mix of flat and nested transforms."""
@@ -1065,7 +1045,7 @@ class TestAlbumentationsWrapperNestedConfig:
         }
         transforms = AlbumentationsWrapper.from_config(config)
         inner = transforms[0].transform.transforms[0]
-        assert isinstance(inner, A.OneOf)
+        assert isinstance(inner, alb.OneOf)
         assert inner.p == pytest.approx(1.0)
 
     def test_one_of_empty_transforms_raises(self):
@@ -1083,7 +1063,7 @@ class TestAlbumentationsWrapperNestedConfig:
         }
         transforms = AlbumentationsWrapper.from_config(config)
         inner = transforms[0].transform.transforms[0]
-        assert isinstance(inner, A.Sequential)
+        assert isinstance(inner, alb.Sequential)
         assert inner.p == pytest.approx(1.0)
 
     def test_some_of_single_p_still_works(self):
@@ -1101,7 +1081,7 @@ class TestAlbumentationsWrapperNestedConfig:
         transforms = AlbumentationsWrapper.from_config(config)
         inner = transforms[0].transform.transforms[0]
 
-        assert isinstance(inner, A.SomeOf)
+        assert isinstance(inner, alb.SomeOf)
         assert inner.p == pytest.approx(0.5)
 
 
@@ -1294,14 +1274,14 @@ class TestTrainingLoop:
     def test_augmentation_in_dataloader(self):
         """Test that augmentations work correctly when used with DataLoader.
 
-        This is a critical integration test that simulates actual training conditions
-        where multiple samples with different numbers of boxes are batched together.
-        It specifically tests that orig_size remains consistent across the batch.
+        This is a critical integration test that simulates actual training conditions where multiple samples with
+        different numbers of boxes are batched together. It specifically tests that orig_size remains consistent across
+        the batch.
         """
         # Create augmentations
         aug_transforms = [
-            AlbumentationsWrapper(A.HorizontalFlip(p=0.5)),
-            AlbumentationsWrapper(A.Rotate(limit=10, p=0.5)),
+            AlbumentationsWrapper(alb.HorizontalFlip(p=0.5)),
+            AlbumentationsWrapper(alb.Rotate(limit=10, p=0.5)),
         ]
         transforms = Compose(aug_transforms)
 
@@ -1338,10 +1318,10 @@ class TestTrainingLoop:
     def test_augmentation_with_varying_box_counts(self):
         """Test that samples with 1, 2, and 3 boxes all work correctly in same batch.
 
-        This specifically tests the edge case where some samples have 2 boxes
-        (which matches orig_size shape [2]), ensuring they don't get mixed up.
+        This specifically tests the edge case where some samples have 2 boxes (which matches orig_size shape [2]),
+        ensuring they don't get mixed up.
         """
-        aug_transforms = [AlbumentationsWrapper(A.HorizontalFlip(p=0.5))]
+        aug_transforms = [AlbumentationsWrapper(alb.HorizontalFlip(p=0.5))]
         transforms = Compose(aug_transforms)
 
         # Create dataset with samples that have different numbers of boxes
@@ -1376,9 +1356,9 @@ class TestTrainingLoop:
     @pytest.mark.parametrize(
         "transform_class,transform_kwargs",
         [
-            (A.HorizontalFlip, {"p": 1.0}),
-            (A.VerticalFlip, {"p": 1.0}),
-            (A.RandomRotate90, {"p": 1.0}),
+            (alb.HorizontalFlip, {"p": 1.0}),
+            (alb.VerticalFlip, {"p": 1.0}),
+            (alb.RandomRotate90, {"p": 1.0}),
         ],
         ids=["horizontal_flip", "vertical_flip", "random_rotate_90"],
     )
@@ -1527,14 +1507,93 @@ class TestMakeCocoTransformsAugConfig:
         assert len(wrappers) == expected_resize_wrappers
 
 
+class TestMakeCocoTransformsOutputSize:
+    """Regression tests for #979: transforms must resize high-resolution images to the target resolution.
+
+    These tests verify that ``make_coco_transforms`` and ``make_coco_transforms_square_div_64``
+    actually produce output images at the requested ``resolution``, not at the original image size.
+    Existing tests only check pipeline *structure*; these check actual output *dimensions*.
+    """
+
+    # 1920x1080 (landscape) — larger than any typical training resolution.
+    # PIL size is (width, height), so Image.new("RGB", (1920, 1080)) gives a 1920-wide, 1080-tall image.
+    _INPUT_W = 1920
+    _INPUT_H = 1080
+    _RESOLUTION = 640
+
+    def _make_image(self) -> Image.Image:
+        return Image.new("RGB", (self._INPUT_W, self._INPUT_H))
+
+    def test_square_val_resizes_large_image(self) -> None:
+        """Square val transform resizes 1920x1080 to exactly 640x640."""
+        transform = make_coco_transforms_square_div_64("val", self._RESOLUTION)
+        tensor, _ = transform(self._make_image(), None)
+        assert tensor.shape[-2:] == (self._RESOLUTION, self._RESOLUTION)
+
+    def test_square_train_resizes_large_image(self) -> None:
+        """Square train transform resizes 1920x1080 to 640x640 regardless of OneOf branch."""
+        transform = make_coco_transforms_square_div_64("train", self._RESOLUTION, aug_config={})
+        tensor, _ = transform(self._make_image(), None)
+        assert tensor.shape[-2:] == (self._RESOLUTION, self._RESOLUTION)
+
+    def test_nonsquare_val_resizes_and_caps_longest_side(self) -> None:
+        """Non-square val transform resizes the image and keeps the longest side within 1333 px.
+
+        Avoid asserting an exact output dimension here because Albumentations resize behavior can vary across supported
+        versions. The stable contract is that the image is resized and the longest side does not exceed the configured
+        maximum.
+        """
+        transform = make_coco_transforms("val", self._RESOLUTION)
+        tensor, _ = transform(self._make_image(), None)
+        height, width = tensor.shape[-2], tensor.shape[-1]
+        assert (height, width) != (self._INPUT_H, self._INPUT_W)
+        assert max(height, width) <= 1333
+
+    def test_nonsquare_val_longest_side_at_most_1333(self) -> None:
+        """Non-square val transform caps the longest side at 1333 px.
+
+        Use an input that still exceeds 1333 px on its longest side after SmallestMaxSize(640), so this assertion
+        specifically validates that LongestMaxSize(1333) is applied.
+        """
+        transform = make_coco_transforms("val", self._RESOLUTION)
+        image = Image.new("RGB", (4000, 1000))
+        tensor, _ = transform(image, None)
+        height, width = tensor.shape[-2], tensor.shape[-1]
+        assert max(height, width) <= 1333
+
+    def test_nonsquare_val_does_not_pass_original_dimensions(self) -> None:
+        """Non-square val transform must not emit the original 1920x1080 dimensions — the core regression."""
+        transform = make_coco_transforms("val", self._RESOLUTION)
+        tensor, _ = transform(self._make_image(), None)
+        height, width = tensor.shape[-2], tensor.shape[-1]
+        assert (height, width) != (self._INPUT_H, self._INPUT_W), (
+            f"Transform emitted original {self._INPUT_H}x{self._INPUT_W} — resize was not applied"
+        )
+
+    def test_square_val_does_not_pass_original_dimensions(self) -> None:
+        """Square val transform must not emit the original 1920x1080 dimensions — the core regression."""
+        transform = make_coco_transforms_square_div_64("val", self._RESOLUTION)
+        tensor, _ = transform(self._make_image(), None)
+        height, width = tensor.shape[-2], tensor.shape[-1]
+        assert (height, width) != (self._INPUT_H, self._INPUT_W), (
+            f"Transform emitted original {self._INPUT_H}x{self._INPUT_W} — resize was not applied"
+        )
+
+    def test_output_is_float_tensor(self) -> None:
+        """Transform pipeline produces a float32 tensor, not a PIL Image."""
+        transform = make_coco_transforms_square_div_64("val", self._RESOLUTION)
+        tensor, _ = transform(self._make_image(), None)
+        assert isinstance(tensor, torch.Tensor)
+        assert tensor.dtype == torch.float32
+
+
 class TestAugPresets:
     """Regression tests for built-in augmentation presets."""
 
     def test_aug_aggressive_translate_percent_is_bidirectional(self) -> None:
         """AUG_AGGRESSIVE translate_percent must allow both positive and negative translations.
 
-        (0.1, 0.1) is a degenerate range that only shifts right/down;
-        the correct range is (-0.1, 0.1).
+        (0.1, 0.1) is a degenerate range that only shifts right/down; the correct range is (-0.1, 0.1).
         """
         translate = AUG_AGGRESSIVE["Affine"]["translate_percent"]
         lo, hi = translate

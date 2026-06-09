@@ -1,3 +1,7 @@
+---
+description: Customize RF-DETR training with PyTorch Lightning primitives. Direct access to RFDETRModelModule, RFDETRDataModule, and build_trainer.
+---
+
 # Custom Training API
 
 The high-level `RFDETR.train()` method is the quickest path to fine-tuning, but the underlying training primitives are fully public and are the **recommended path for any customisation**: custom callbacks, alternative loggers, mixed-precision overrides, multi-GPU strategies, or integration with external training frameworks.
@@ -368,8 +372,8 @@ All logged keys (`train/loss`, `val/mAP_50_95`, `val/F1`, `val/ema_mAP_50_95`, e
 
 ## See also
 
-- [RFDETR.train() — high-level API](../index.md#quick-start) — the one-liner training path
-- [Training parameters](../training-parameters.md) — all `TrainConfig` fields
-- [Training loggers](../loggers.md) — TensorBoard, WandB, MLflow setup
-- [Advanced training](../advanced.md) — checkpointing, early stopping, memory optimisation
+- [RFDETR.train() — high-level API](index.md#quick-start) — the one-liner training path
+- [Training parameters](training-parameters.md) — all `TrainConfig` fields
+- [Training loggers](loggers.md) — TensorBoard, WandB, MLflow setup
+- [Advanced training](advanced.md) — checkpointing, early stopping, memory optimisation
 - [PTL primitives API reference](../../reference/training.md) — full docstring reference

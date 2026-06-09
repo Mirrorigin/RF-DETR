@@ -12,10 +12,7 @@
 # Copied from DETR (https://github.com/facebookresearch/detr)
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # ------------------------------------------------------------------------
-
-"""
-Transforms and data augmentation for both image + bbox.
-"""
+"""Transforms and data augmentation for both image + bbox."""
 
 from __future__ import annotations
 
@@ -25,9 +22,9 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 try:
-    import albumentations as A
+    import albumentations as alb
 except ImportError:
-    A = None  # type: ignore[assignment]
+    alb = None  # type: ignore[assignment]
 import numpy as np
 import PIL
 import torch
@@ -120,12 +117,11 @@ GEOMETRIC_TRANSFORMS = {
 ALBUMENTATIONS_CONTAINERS = frozenset({"OneOf", "SomeOf", "Sequential"})
 
 
-def _is_geometric_transform(transform: A.BasicTransform) -> bool:
+def _is_geometric_transform(transform: alb.BasicTransform) -> bool:
     """Return True if transform (or any nested transform) affects spatial coordinates.
 
-    For container transforms such as ``A.OneOf`` or ``A.Sequential``, returns
-    ``True`` when *any* nested transform is geometric so that bounding-box
-    handling is enabled for the whole container.
+    For container transforms such as ``A.OneOf`` or ``A.Sequential``, returns ``True`` when *any* nested transform is
+    geometric so that bounding-box handling is enabled for the whole container.
 
     Args:
         transform: Albumentations transform to inspect.
@@ -134,12 +130,12 @@ def _is_geometric_transform(transform: A.BasicTransform) -> bool:
         ``True`` if the transform modifies spatial layout; ``False`` otherwise.
 
     Examples:
-        >>> import albumentations as A
-        >>> _is_geometric_transform(A.HorizontalFlip())
+        >>> from albumentations import GaussianBlur, HorizontalFlip, OneOf
+        >>> _is_geometric_transform(HorizontalFlip())
         True
-        >>> _is_geometric_transform(A.GaussianBlur())
+        >>> _is_geometric_transform(GaussianBlur())
         False
-        >>> _is_geometric_transform(A.OneOf([A.HorizontalFlip(), A.GaussianBlur()]))
+        >>> _is_geometric_transform(OneOf([HorizontalFlip(), GaussianBlur()]))
         True
     """
     if type(transform).__name__ in GEOMETRIC_TRANSFORMS:
@@ -150,23 +146,20 @@ def _is_geometric_transform(transform: A.BasicTransform) -> bool:
     return False
 
 
-def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform:
+def _build_albu_transform(name: str, params: Dict[str, Any]) -> alb.BasicTransform:
     """Build a single Albumentations transform from its name and parameter dict.
 
-    Handles container transforms (``OneOf``, ``SomeOf``, ``Sequential``) by
-    recursively building the nested ``transforms`` list.  Leaf transforms are
-    instantiated directly from the ``albumentations`` namespace.
+    Handles container transforms (``OneOf``, ``SomeOf``, ``Sequential``) by recursively building the nested
+    ``transforms`` list.  Leaf transforms are instantiated directly from the ``albumentations`` namespace.
 
-    Both ``OneOf`` and ``Sequential`` always fire (``p=1.0`` is forced,
-    ignoring any user-supplied ``p``).  For ``OneOf``, which child is applied
-    is determined by the children's own ``p`` values; at least one nested
-    transform is required.  ``Sequential`` runs all transforms in order.
+    Both ``OneOf`` and ``Sequential`` always fire (``p=1.0`` is forced, ignoring any user-supplied ``p``).  For
+    ``OneOf``, which child is applied is determined by the children's own ``p`` values; at least one nested transform is
+    required.  ``Sequential`` runs all transforms in order.
 
     Args:
         name: Transform name (e.g. ``"HorizontalFlip"``, ``"OneOf"``).
         params: Parameter dictionary for the transform.  For container transforms
-            the dict must contain a ``"transforms"`` key whose value is a list of
-            single-key dicts ``{name: params}``.
+            the dict must contain a ``"transforms"`` key whose value is a list of single-key dicts ``{name: params}``.
 
     Returns:
         Instantiated Albumentations transform.
@@ -175,22 +168,22 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
         ValueError: If ``name`` is unknown or ``params`` is malformed.
 
     Examples:
-        >>> import albumentations as A
+        >>> from albumentations import HorizontalFlip, OneOf
         >>> t = _build_albu_transform("HorizontalFlip", {"p": 0.5})
-        >>> isinstance(t, A.HorizontalFlip)
+        >>> isinstance(t, HorizontalFlip)
         True
         >>> container = _build_albu_transform(
         ...     "OneOf",
         ...     {"transforms": [{"HorizontalFlip": {"p": 1.0}}, {"VerticalFlip": {"p": 1.0}}]},
         ... )
-        >>> isinstance(container, A.OneOf)
+        >>> isinstance(container, OneOf)
         True
     """
     if name in ALBUMENTATIONS_CONTAINERS:
         raw_nested = params.get("transforms", [])
         if not isinstance(raw_nested, list):
             raise ValueError(f"'{name}.transforms' must be a list, got {type(raw_nested).__name__}")
-        nested_transforms: List[A.BasicTransform] = []
+        nested_transforms: List[alb.BasicTransform] = []
         for entry in raw_nested:
             if not isinstance(entry, dict) or len(entry) != 1:
                 raise ValueError(f"Each nested transform entry must be a single-key dict, got {entry!r}")
@@ -213,12 +206,12 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
         else:
             other_params = {k: v for k, v in params.items() if k != "transforms"}
 
-        container_cls = getattr(A, name, None)
+        container_cls = getattr(alb, name, None)
         if container_cls is None:
             raise ValueError(f"Unknown Albumentations container: {name!r}")
         return container_cls(transforms=nested_transforms, **other_params)
 
-    aug_cls = getattr(A, name, None)
+    aug_cls = getattr(alb, name, None)
     if aug_cls is None:
         raise ValueError(f"Unknown Albumentations transform: {name!r}")
     return aug_cls(**_normalize_albu_params(name, params, aug_cls))
@@ -228,17 +221,15 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
 def _random_sized_crop_uses_size_param(aug_cls: type) -> bool:
     """Return whether ``RandomSizedCrop`` expects a ``size`` keyword.
 
-    The Albumentations 2.x API changed ``RandomSizedCrop`` from separate
-    ``height``/``width`` parameters to a single ``size=(height, width)``
-    parameter. This helper caches the signature check per class so repeated
-    transform construction during dataset setup does not repeat introspection.
+    The Albumentations 2.x API changed ``RandomSizedCrop`` from separate ``height``/``width`` parameters to a single
+    ``size=(height, width)`` parameter. This helper caches the signature check per class so repeated transform
+    construction during dataset setup does not repeat introspection.
 
     Args:
         aug_cls: Albumentations transform class to inspect.
 
     Returns:
-        ``True`` when the class accepts a ``size`` keyword argument; otherwise
-        ``False``.
+        ``True`` when the class accepts a ``size`` keyword argument; otherwise ``False``.
     """
 
     signature = inspect.signature(aug_cls.__init__)
@@ -248,9 +239,8 @@ def _random_sized_crop_uses_size_param(aug_cls: type) -> bool:
 def _normalize_albu_params(name: str, params: Dict[str, Any], aug_cls: type) -> Dict[str, Any]:
     """Normalize transform params across Albumentations API variations.
 
-    Currently this adapts ``RandomSizedCrop`` arguments so a config using
-    ``height``/``width`` works on Albumentations 2.x and a config using
-    ``size=(height, width)`` still works on Albumentations 1.x.
+    Currently this adapts ``RandomSizedCrop`` arguments so a config using ``height``/``width`` works on Albumentations
+    2.x and a config using ``size=(height, width)`` still works on Albumentations 1.x.
 
     Args:
         name: Albumentations transform name.
@@ -258,8 +248,7 @@ def _normalize_albu_params(name: str, params: Dict[str, Any], aug_cls: type) -> 
         aug_cls: Albumentations transform class that will be instantiated.
 
     Returns:
-        A normalized copy of ``params`` suitable for the installed
-        Albumentations version.
+        A normalized copy of ``params`` suitable for the installed Albumentations version.
 
     Examples:
         >>> class CropV2:
@@ -336,9 +325,8 @@ def _normalize_albu_params(name: str, params: Dict[str, Any], aug_cls: type) -> 
 class AlbumentationsWrapper:
     """Wrapper to apply Albumentations transforms to (image, target) tuples.
 
-    This wrapper integrates Albumentations transforms with RF-DETR's data pipeline,
-    automatically handling bounding box and segmentation mask transformations for
-    geometric augmentations while preserving the (image, target) tuple format.
+    This wrapper integrates Albumentations transforms with RF-DETR's data pipeline, automatically handling bounding box
+    and segmentation mask transformations for geometric augmentations while preserving the (image, target) tuple format.
 
     The wrapper automatically detects transform types:
     - **Geometric transforms** (flips, rotations, crops): Bounding boxes and instance
@@ -346,42 +334,39 @@ class AlbumentationsWrapper:
     - **Pixel-level transforms** (blur, color adjustments, noise): Bounding boxes and
       masks remain unchanged as only pixel values are modified.
 
-    Detection checks the transform class name against ``GEOMETRIC_TRANSFORMS`` and
-    recursively inspects nested container transforms (for example ``OneOf`` and
-    ``Sequential``). For geometric transforms, bbox_params are automatically configured
-    to handle coordinate transformations, clip boxes to image boundaries, and remove
-    invalid boxes.
+    Detection checks the transform class name against ``GEOMETRIC_TRANSFORMS`` and recursively inspects nested container
+    transforms (for example ``OneOf`` and ``Sequential``). For geometric transforms, bbox_params are automatically
+    configured to handle coordinate transformations, clip boxes to image boundaries, and remove invalid boxes.
 
     Args:
-        transform: Albumentations transform to apply (e.g., A.HorizontalFlip, A.GaussianBlur).
+        transform: Albumentations transform to apply (e.g., alb.HorizontalFlip, alb.GaussianBlur).
 
     Examples:
-        >>> import albumentations as A
+        >>> from albumentations import GaussianBlur, HorizontalFlip
         >>> # Geometric transform - automatically transforms boxes
-        >>> wrapper = AlbumentationsWrapper(A.HorizontalFlip(p=1.0))
+        >>> wrapper = AlbumentationsWrapper(HorizontalFlip(p=1.0))
         >>> image = Image.new("RGB", (300, 400))
         >>> target = {"boxes": torch.tensor([[10, 20, 100, 200]]), "labels": torch.tensor([1])}
         >>> aug_image, aug_target = wrapper(image, target)
 
         >>> # Pixel-level transform - automatically preserves boxes
-        >>> wrapper = AlbumentationsWrapper(A.GaussianBlur(p=1.0))
+        >>> wrapper = AlbumentationsWrapper(GaussianBlur(p=1.0))
         >>> aug_image, aug_target = wrapper(image, target)
 
     Note:
-        For custom geometric transforms, add the transform class name to the
-        GEOMETRIC_TRANSFORMS set at module level.
+        For custom geometric transforms, add the transform class name to the GEOMETRIC_TRANSFORMS set at module level.
     """
 
-    def __init__(self, transform: A.BasicTransform) -> None:
+    def __init__(self, transform: alb.BasicTransform) -> None:
         # Auto-detect if transform is geometric (recursively for containers)
         self._is_geometric = _is_geometric_transform(transform)
 
         if self._is_geometric:
             # Wrap geometric transform with bbox handling capabilities
             # bbox_params configure how Albumentations should transform bounding boxes:
-            self.transform = A.Compose(
+            self.transform = alb.Compose(
                 [transform],
-                bbox_params=A.BboxParams(
+                bbox_params=alb.BboxParams(
                     format="pascal_voc",  # Boxes are in (x1, y1, x2, y2) format
                     label_fields=["category_ids", "idxs"],  # Track labels and indices for per-instance field sync
                     min_visibility=0.0,  # Remove boxes with zero visibility/area after transformation
@@ -391,7 +376,7 @@ class AlbumentationsWrapper:
         else:
             # Wrap non-geometric transform without bbox handling
             # Simpler composition since boxes don't need transformation
-            self.transform = A.Compose([transform])
+            self.transform = alb.Compose([transform])
 
     def __repr__(self) -> str:
         """Return a readable string representation of the wrapper.
@@ -400,12 +385,12 @@ class AlbumentationsWrapper:
             Representation including the wrapped transform and type.
         """
         transform = None
-        if isinstance(self.transform, A.Compose):
+        if isinstance(self.transform, alb.Compose):
             for candidate in self.transform.transforms:
-                if isinstance(candidate, A.BasicTransform):
+                if isinstance(candidate, alb.BasicTransform):
                     transform = candidate
                     break
-        elif isinstance(self.transform, A.BasicTransform):
+        elif isinstance(self.transform, alb.BasicTransform):
             transform = self.transform
 
         if transform is None:
@@ -484,8 +469,8 @@ class AlbumentationsWrapper:
     ) -> Tuple[Image.Image, Dict[str, Any]]:
         """Apply geometric transform to image with boxes and optionally masks.
 
-        Converts data to Albumentations format, applies the transform, and converts
-        back to RF-DETR format. Handles box removal and per-instance field filtering.
+        Converts data to Albumentations format, applies the transform, and converts back to RF-DETR format. Handles box
+        removal and per-instance field filtering.
 
         Args:
             image_np: Numpy array of image in HWC format.
@@ -495,9 +480,9 @@ class AlbumentationsWrapper:
         Returns:
             Tuple of (transformed PIL Image, transformed target dict).
 
-        >>> import albumentations as A
         >>> import torch
-        >>> wrapper = AlbumentationsWrapper(A.HorizontalFlip(p=1.0))
+        >>> from albumentations import HorizontalFlip
+        >>> wrapper = AlbumentationsWrapper(HorizontalFlip(p=1.0))
         >>> img = np.ones((100, 100, 3), dtype=np.uint8)
         >>> tgt = {"boxes": torch.tensor([[10, 20, 30, 40]]), "labels": torch.tensor([1])}
         >>> img_out, tgt_out = wrapper._apply_geometric_transform(img, tgt, [1])
@@ -589,8 +574,8 @@ class AlbumentationsWrapper:
                 - 'labels': PyTorch tensor of shape (N,) with class labels
                 - 'boxes' (optional): PyTorch tensor of shape (N, 4) in (x1, y1, x2, y2) format
                 - 'masks' (optional): PyTorch tensor of shape (N, H, W) with instance segmentation masks.
-                  For geometric transforms, masks are transformed alongside boxes to maintain alignment.
-                  Requires 'boxes' to be present; a warning is logged if masks exist without boxes.
+                  For geometric transforms, masks are transformed alongside boxes to maintain alignment. Requires
+                  'boxes' to be present; a warning is logged if masks exist without boxes.
                 Pass ``None`` for inference scenarios where no ground-truth annotations are available.
 
         Returns:
@@ -605,7 +590,8 @@ class AlbumentationsWrapper:
             ValueError: If boxes don't have shape (N, 4).
 
         Examples:
-            >>> wrapper = AlbumentationsWrapper(A.HorizontalFlip(p=1.0))
+            >>> from albumentations import HorizontalFlip
+            >>> wrapper = AlbumentationsWrapper(HorizontalFlip(p=1.0))
             >>> image = Image.new('RGB', (100, 100))
             >>> target = {"boxes": torch.tensor([[10, 20, 90, 80]]), "labels": torch.tensor([1])}
             >>> aug_image, aug_target = wrapper(image, target)
@@ -661,10 +647,9 @@ class AlbumentationsWrapper:
     ) -> List["AlbumentationsWrapper"]:
         """Build a list of :class:`AlbumentationsWrapper` instances from a config.
 
-        Supports both a flat dictionary format (backward-compatible) and a list
-        format that allows duplicate transform names and explicit ordering.
-        Container transforms (``OneOf``, ``SomeOf``, ``Sequential``) may be
-        nested arbitrarily deep.
+        Supports both a flat dictionary format (backward-compatible) and a list format that allows duplicate transform
+        names and explicit ordering. Container transforms (``OneOf``, ``SomeOf``, ``Sequential``) may be nested
+        arbitrarily deep.
 
         **Dict format** (existing, backward-compatible)::
 
@@ -679,8 +664,7 @@ class AlbumentationsWrapper:
                 },
             }
 
-        **List format** (new; useful when you need two entries with the same name
-        or when explicit order matters)::
+        **List format** (new; useful when you need two entries with the same name or when explicit order matters)::
 
             config = [
                 {"HorizontalFlip": {"p": 0.5}},
@@ -692,16 +676,14 @@ class AlbumentationsWrapper:
                 }},
             ]
 
-        **Shorthand for container ``transforms`` list** -- when a container key's
-        value is a *list* rather than a dict, it is interpreted as the
-        ``transforms`` parameter::
+        **Shorthand for container ``transforms`` list** -- when a container key's value is a *list* rather than a dict,
+        it is interpreted as the ``transforms`` parameter::
 
             {"OneOf": [{"HorizontalFlip": {"p": 1.0}}, {"VerticalFlip": {"p": 1.0}}]}
 
         Args:
             config_dict: Augmentation configuration -- either a ``dict`` mapping
-                transform names to parameter dicts, or a ``list`` of single-key
-                dicts ``{name: params}``.
+                transform names to parameter dicts, or a ``list`` of single-key dicts ``{name: params}``.
 
         Returns:
             List of :class:`AlbumentationsWrapper` instances in config order.

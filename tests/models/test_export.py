@@ -3,16 +3,14 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
-"""
-Tests for model export functionality.
+"""Tests for model export functionality.
 
 Use cases covered:
 - Segmentation outputs must be present in both train/eval modes to avoid export crashes.
 - Export should not change the original model's training state.
 - CLI export path (deploy.export.main) must include 'masks' in output_names for
-  segmentation models, call make_infer_image with the correct individual args, and
-  call export_onnx with args.output_dir as the first argument.
+  segmentation models, call make_infer_image with the correct individual args, and call export_onnx with args.output_dir
+  as the first argument.
 """
 
 import importlib.util
@@ -42,6 +40,32 @@ def ignore_tracer_warnings() -> Iterator[None]:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=TracerWarning)
         yield
+
+
+class _DummyCoreModel:
+    """Minimal torch.nn.Module stub shared across export tests.
+
+    Avoids real forward passes; returns synthetic detection (and optionally segmentation) outputs matching the shapes
+    expected by RFDETR.export().
+    """
+
+    def __init__(self, *, segmentation_head: bool = False) -> None:
+        self._segmentation_head = segmentation_head
+
+    def to(self, *_args, **_kwargs):
+        return self
+
+    def eval(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def __call__(self, *_args, **_kwargs):
+        out = {"pred_boxes": torch.zeros(1, 1, 4), "pred_logits": torch.zeros(1, 1, 2)}
+        if self._segmentation_head:
+            out["pred_masks"] = torch.zeros(1, 1, 2, 2)
+        return out
 
 
 def test_export_onnx_uses_legacy_exporter_when_dynamo_flag_exists(
@@ -79,8 +103,7 @@ def test_export_onnx_uses_legacy_exporter_when_dynamo_flag_exists(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for export test")
 @pytest.mark.skipif(not _IS_ONNX_INSTALLED, reason="onnx not installed, run: pip install rfdetr[onnx]")
 def test_segmentation_model_export_no_crash(tmp_path: Path) -> None:
-    """
-    Integration test: exporting a segmentation model should not crash.
+    """Integration test: exporting a segmentation model should not crash.
 
     This exercises the full export path to ensure no AttributeError occurs.
     """
@@ -99,11 +122,10 @@ def test_segmentation_model_export_no_crash(tmp_path: Path) -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for export test")
 @pytest.mark.skipif(not _IS_ONNX_INSTALLED, reason="onnx not installed, run: pip install rfdetr[onnx]")
 def test_export_does_not_change_original_training_state(tmp_path: Path) -> None:
-    """
-    Verify that calling export() does not change the original model's train/eval state.
+    """Verify that calling export() does not change the original model's train/eval state.
 
-    This ensures that export() puts a deepcopy of the model in eval mode without
-    mutating the underlying training model used by RF-DETR.
+    This ensures that export() puts a deepcopy of the model in eval mode without mutating the underlying training model
+    used by RF-DETR.
     """
     model = RFDETRSegNano()
 
@@ -126,30 +148,14 @@ def test_export_does_not_change_original_training_state(tmp_path: Path) -> None:
 def _detr_export_scaffold(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Shared scaffold for RFDETR.export() deprecated-argument tests."""
 
-    class _DummyCoreModel:
-        def to(self, *_args, **_kwargs):
-            return self
-
-        def eval(self):
-            return self
-
-        def cpu(self):
-            return self
-
-        def __call__(self, *_args, **_kwargs):
-            return {
-                "pred_boxes": torch.zeros(1, 1, 4),
-                "pred_logits": torch.zeros(1, 1, 2),
-                "pred_masks": torch.zeros(1, 1, 2, 2),
-            }
-
     model = types.SimpleNamespace(
         model=types.SimpleNamespace(
             model=_DummyCoreModel(),
             device="cpu",
             resolution=14,
         ),
-        model_config=types.SimpleNamespace(segmentation_head=False),
+        model_config=types.SimpleNamespace(segmentation_head=False, num_channels=3),
+        size=None,
     )
 
     export_called: dict[str, bool] = {"value": False}
@@ -182,32 +188,15 @@ def test_rfdetr_export_dynamic_batch_forwards_dynamic_axes(
     dynamic_batch: bool,
     segmentation_head: bool,
 ) -> None:
-    """`RFDETR.export(..., dynamic_batch=True)` must pass a non-None `dynamic_axes` dict
-    to `export_onnx`; `dynamic_batch=False` must pass `None`.
-    """
-
-    class _DummyCoreModel:
-        def to(self, *_args, **_kwargs):
-            return self
-
-        def eval(self):
-            return self
-
-        def cpu(self):
-            return self
-
-        def __call__(self, *_args, **_kwargs):
-            if segmentation_head:
-                return {
-                    "pred_boxes": torch.zeros(1, 1, 4),
-                    "pred_logits": torch.zeros(1, 1, 2),
-                    "pred_masks": torch.zeros(1, 1, 2, 2),
-                }
-            return {"pred_boxes": torch.zeros(1, 1, 4), "pred_logits": torch.zeros(1, 1, 2)}
+    """`RFDETR.export(..., dynamic_batch=True)` must pass a non-None `dynamic_axes` dict to `export_onnx`;
+    `dynamic_batch=False` must pass `None`."""
 
     model = types.SimpleNamespace(
-        model=types.SimpleNamespace(model=_DummyCoreModel(), device="cpu", resolution=14),
-        model_config=types.SimpleNamespace(segmentation_head=segmentation_head),
+        model=types.SimpleNamespace(
+            model=_DummyCoreModel(segmentation_head=segmentation_head), device="cpu", resolution=14
+        ),
+        model_config=types.SimpleNamespace(segmentation_head=segmentation_head, num_channels=3),
+        size=None,
     )
 
     captured: dict = {}
@@ -287,8 +276,7 @@ def test_segmentation_outputs_present_in_train_and_eval(mode: Literal["train", "
 
 
 class TestCliExportMain:
-    """
-    Unit tests for deploy.export.main() (CLI export path).
+    """Unit tests for deploy.export.main() (CLI export path).
 
     Three bugs were present before the fix:
     1. output_names omitted 'masks' for segmentation models.
@@ -335,12 +323,10 @@ class TestCliExportMain:
 
     @staticmethod
     def _run(args: types.SimpleNamespace) -> tuple[dict, dict]:
-        """
-        Run deploy.export.main(args) with all heavy dependencies mocked.
+        """Run deploy.export.main(args) with all heavy dependencies mocked.
 
-        Stubs out build_model, make_infer_image, and export_onnx, and injects
-        mock onnx/onnxsim modules so the export module can be imported even when
-        those optional packages are not installed.
+        Stubs out build_model, make_infer_image, and export_onnx, and injects mock onnx/onnxsim modules so the export
+        module can be imported even when those optional packages are not installed.
 
         Returns (make_infer_image_captured, export_onnx_captured).
         """
@@ -414,12 +400,11 @@ class TestCliExportMain:
         backbone_only: bool,
         expected_output_names: list[str],
     ) -> None:
-        """
-        export_onnx must receive the correct output_names for every model type.
+        """export_onnx must receive the correct output_names for every model type.
 
         Before the fix, deploy/export.py line 253 used:
 
-            output_names = ['features'] if args.backbone_only else ['dets', 'labels']
+        output_names = ['features'] if args.backbone_only else ['dets', 'labels']
 
         which always omitted 'masks' for segmentation models.
         """
@@ -434,13 +419,12 @@ class TestCliExportMain:
         assert actual == expected_output_names, f"expected output_names={expected_output_names}, got {actual!r}"
 
     def test_make_infer_image_receives_individual_fields(self, output_dir: str) -> None:
-        """
-        make_infer_image must be called with (infer_dir, shape, batch_size, device),
-        not with the whole args Namespace.
+        """make_infer_image must be called with (infer_dir, shape, batch_size, device), not with the whole args
+        Namespace.
 
         Before the fix, deploy/export.py line 251 used:
 
-            input_tensors = make_infer_image(args, device)
+        input_tensors = make_infer_image(args, device)
         """
         shape = (640, 640)
         batch_size = 2
@@ -457,13 +441,12 @@ class TestCliExportMain:
         assert pos[:3] == (infer_dir, shape, batch_size), f"expected (infer_dir, shape, batch_size), got {pos[:3]!r}"
 
     def test_export_onnx_receives_output_dir_and_kwargs(self, output_dir: str) -> None:
-        """
-        export_onnx must be called as export_onnx(output_dir, model, ...) with
-        backbone_only, verbose, and opset_version forwarded as keyword args.
+        """export_onnx must be called as export_onnx(output_dir, model, ...) with backbone_only, verbose, and
+        opset_version forwarded as keyword args.
 
         Before the fix, deploy/export.py line 294 used:
 
-            export_onnx(model, args, input_names, input_tensors, output_names, dynamic_axes)
+        export_onnx(model, args, input_names, input_tensors, output_names, dynamic_axes)
 
         which swapped output_dir/model and dropped all keyword args.
         """
@@ -490,8 +473,7 @@ class TestCliExportMain:
     def test_simplify_flag_logs_warning_and_continues_export(self, output_dir: str) -> None:
         """CLI --simplify=True must log a deprecation warning and still call export_onnx.
 
-        The flag is now a no-op: the logger emits a warning and export continues
-        without running ONNX simplification.
+        The flag is now a no-op: the logger emits a warning and export continues without running ONNX simplification.
         """
         args = self._make_args(output_dir=output_dir, simplify=True)
         export_onnx_called: dict[str, bool] = {"value": False}
@@ -586,19 +568,6 @@ class TestExportPatchSize:
     ) -> types.SimpleNamespace:
         """Build a minimal RFDETR-like namespace with controllable patch_size/num_windows."""
 
-        class _DummyCoreModel:
-            def to(self, *_a, **_kw):
-                return self
-
-            def eval(self):
-                return self
-
-            def cpu(self):
-                return self
-
-            def __call__(self, *_a, **_kw):
-                return {"pred_boxes": torch.zeros(1, 1, 4), "pred_logits": torch.zeros(1, 1, 2)}
-
         model = types.SimpleNamespace(
             model=types.SimpleNamespace(
                 model=_DummyCoreModel(),
@@ -609,7 +578,9 @@ class TestExportPatchSize:
                 segmentation_head=False,
                 patch_size=patch_size,
                 num_windows=num_windows,
+                num_channels=3,
             ),
+            size=None,
         )
 
         def _fake_make_infer_image(*_a, **_kw):
@@ -633,7 +604,7 @@ class TestExportPatchSize:
     def test_export_invalid_patch_size_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_patch_size: int
     ) -> None:
-        """export() must raise ValueError when patch_size is not a positive integer."""
+        """Export() must raise ValueError when patch_size is not a positive integer."""
         model = self._scaffold(monkeypatch, tmp_path, patch_size=14, num_windows=4)
         # Keep model_config.patch_size consistent with the patch_size argument for this test
         model.model_config.patch_size = bad_patch_size
@@ -643,7 +614,7 @@ class TestExportPatchSize:
     def test_export_shape_must_be_divisible_by_block_size(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """export() must reject shapes not divisible by patch_size * num_windows."""
+        """Export() must reject shapes not divisible by patch_size * num_windows."""
         # patch_size=16, num_windows=2 → block_size=32; shape (48, 64): 48 % 32 != 0
         model = self._scaffold(monkeypatch, tmp_path, patch_size=16, num_windows=2)
         with pytest.raises(ValueError, match="divisible by 32"):
@@ -661,13 +632,13 @@ class TestExportPatchSize:
     def test_export_negative_or_zero_shape_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_shape: tuple[int, int]
     ) -> None:
-        """export() must reject non-positive shape dimensions (Python -N % M == 0 wraps silently)."""
+        """Export() must reject non-positive shape dimensions (Python -N % M == 0 wraps silently)."""
         model = self._scaffold(monkeypatch, tmp_path, patch_size=16, num_windows=2)
         with pytest.raises(ValueError, match="positive integers"):
             _detr_module.RFDETR.export(model, output_dir=str(tmp_path), shape=bad_shape)
 
     def test_export_shape_valid_for_block_size(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """export() accepts shape divisible by patch_size * num_windows without error."""
+        """Export() accepts shape divisible by patch_size * num_windows without error."""
         # patch_size=16, num_windows=2 → block_size=32; shape (64, 64) is valid
         model = self._scaffold(monkeypatch, tmp_path, patch_size=16, num_windows=2)
         # Should not raise
@@ -677,7 +648,7 @@ class TestExportPatchSize:
     def test_export_bool_patch_size_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_patch_size: bool
     ) -> None:
-        """export() must reject bool values for patch_size (isinstance(True, int) is True)."""
+        """Export() must reject bool values for patch_size (isinstance(True, int) is True)."""
         model = self._scaffold(monkeypatch, tmp_path, patch_size=14, num_windows=1)
         with pytest.raises(ValueError, match="patch_size must be a positive integer"):
             _detr_module.RFDETR.export(model, output_dir=str(tmp_path), patch_size=bad_patch_size)
@@ -703,7 +674,7 @@ class TestExportPatchSize:
     def test_export_invalid_shape_type_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_shape: tuple
     ) -> None:
-        """export() must raise ValueError for float, bool, or wrong-arity shape tuples."""
+        """Export() must raise ValueError for float, bool, or wrong-arity shape tuples."""
         model = self._scaffold(monkeypatch, tmp_path, patch_size=14, num_windows=1)
         with pytest.raises(ValueError, match="shape"):
             _detr_module.RFDETR.export(model, output_dir=str(tmp_path), shape=bad_shape)
@@ -712,7 +683,7 @@ class TestExportPatchSize:
     def test_export_invalid_num_windows_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_num_windows: int
     ) -> None:
-        """export() must raise ValueError when model_config.num_windows is not a positive integer."""
+        """Export() must raise ValueError when model_config.num_windows is not a positive integer."""
         model = self._scaffold(monkeypatch, tmp_path, patch_size=14, num_windows=1)
         model.model_config.num_windows = bad_num_windows
         with pytest.raises(ValueError, match="num_windows must be a positive integer"):
@@ -721,7 +692,7 @@ class TestExportPatchSize:
     def test_export_default_resolution_not_divisible_by_block_size_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """export() with shape=None must raise ValueError when model.resolution % block_size != 0."""
+        """Export() with shape=None must raise ValueError when model.resolution % block_size != 0."""
         # patch_size=14, num_windows=3 → block_size=42; scaffold sets resolution=84 (42*2) which is valid
         # Override resolution to 50 (not divisible by 42) to trigger the check
         model = self._scaffold(monkeypatch, tmp_path, patch_size=14, num_windows=3)
@@ -733,12 +704,194 @@ class TestExportPatchSize:
 def test_make_infer_image_produces_correct_rectangular_shape() -> None:
     """make_infer_image must produce a (B, C, H, W) tensor for non-square shapes.
 
-    Regression test for the square-resize bug where ``Resize((shape[0], shape[0]))``
-    was used instead of ``Resize((shape[0], shape[1]))``, causing the output width
-    to silently equal the height.
+    Regression test for the square-resize bug where ``Resize((shape[0], shape[0]))`` was used instead of
+    ``Resize((shape[0], shape[1]))``, causing the output width to silently equal the height.
     """
     from rfdetr.export.main import make_infer_image
 
     h, w, b = 112, 224, 2
     tensor = make_infer_image(infer_dir=None, shape=(h, w), batch_size=b, device="cpu")
     assert tensor.shape == (b, 3, h, w), f"Expected shape ({b}, 3, {h}, {w}), got {tensor.shape}"
+
+
+# ---------------------------------------------------------------------------
+# ONNX export variant naming
+# ---------------------------------------------------------------------------
+
+
+class TestExportOnnxVariantNaming:
+    """Verify that export_onnx uses variant_name in the output filename."""
+
+    def test_variant_name_in_filename(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """When variant_name is provided, the ONNX file is named after the variant."""
+        captured: dict = {}
+
+        def _fake_onnx_export(*args, **kwargs) -> None:
+            captured["output_file"] = args[2]  # 3rd positional arg is output_file
+
+        monkeypatch.setattr(_cli_export_module.torch.onnx, "export", _fake_onnx_export)
+
+        _cli_export_module.export_onnx(
+            output_dir=str(tmp_path),
+            model=torch.nn.Identity(),
+            input_names=["input"],
+            input_tensors=torch.randn(1, 3, 8, 8),
+            output_names=["dets"],
+            dynamic_axes=None,
+            verbose=False,
+            variant_name="rfdetr-medium",
+        )
+
+        assert captured["output_file"].endswith("rfdetr-medium.onnx")
+
+    def test_variant_name_with_backbone(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """backbone_only + variant_name produces '{variant}-backbone.onnx'."""
+        captured: dict = {}
+
+        def _fake_onnx_export(*args, **kwargs) -> None:
+            captured["output_file"] = args[2]
+
+        monkeypatch.setattr(_cli_export_module.torch.onnx, "export", _fake_onnx_export)
+
+        _cli_export_module.export_onnx(
+            output_dir=str(tmp_path),
+            model=torch.nn.Identity(),
+            input_names=["input"],
+            input_tensors=torch.randn(1, 3, 8, 8),
+            output_names=["features"],
+            dynamic_axes=None,
+            backbone_only=True,
+            verbose=False,
+            variant_name="rfdetr-nano",
+        )
+
+        assert captured["output_file"].endswith("rfdetr-nano-backbone.onnx")
+
+    def test_default_name_without_variant(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Without variant_name, falls back to 'inference_model.onnx'."""
+        captured: dict = {}
+
+        def _fake_onnx_export(*args, **kwargs) -> None:
+            captured["output_file"] = args[2]
+
+        monkeypatch.setattr(_cli_export_module.torch.onnx, "export", _fake_onnx_export)
+
+        _cli_export_module.export_onnx(
+            output_dir=str(tmp_path),
+            model=torch.nn.Identity(),
+            input_names=["input"],
+            input_tensors=torch.randn(1, 3, 8, 8),
+            output_names=["dets"],
+            dynamic_axes=None,
+            verbose=False,
+        )
+
+        assert captured["output_file"].endswith("inference_model.onnx")
+
+    def test_default_backbone_name_without_variant(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Without variant_name + backbone_only, falls back to 'backbone_model.onnx'."""
+        captured: dict = {}
+
+        def _fake_onnx_export(*args, **kwargs) -> None:
+            captured["output_file"] = args[2]
+
+        monkeypatch.setattr(_cli_export_module.torch.onnx, "export", _fake_onnx_export)
+
+        _cli_export_module.export_onnx(
+            output_dir=str(tmp_path),
+            model=torch.nn.Identity(),
+            input_names=["input"],
+            input_tensors=torch.randn(1, 3, 8, 8),
+            output_names=["features"],
+            dynamic_axes=None,
+            backbone_only=True,
+            verbose=False,
+        )
+
+        assert captured["output_file"].endswith("backbone_model.onnx")
+
+    def test_rfdetr_export_passes_variant_name(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """RFDETR.export() passes self.size as variant_name to export_onnx."""
+        captured: dict = {}
+
+        model = types.SimpleNamespace(
+            model=types.SimpleNamespace(model=_DummyCoreModel(), device="cpu", resolution=14),
+            model_config=types.SimpleNamespace(segmentation_head=False, num_channels=3),
+            size="rfdetr-medium",
+        )
+
+        def _fake_make_infer_image(*_args, **_kwargs):
+            return torch.zeros(1, 3, 14, 14)
+
+        def _fake_export_onnx(*_args, variant_name=None, **_kw):
+            captured["variant_name"] = variant_name
+            return str(tmp_path / "rfdetr-medium.onnx")
+
+        monkeypatch.setattr("rfdetr.export.main.make_infer_image", _fake_make_infer_image)
+        monkeypatch.setattr("rfdetr.export.main.export_onnx", _fake_export_onnx)
+        monkeypatch.setattr("rfdetr.detr.deepcopy", lambda x: x)
+
+        _detr_module.RFDETR.export(model, output_dir=str(tmp_path), shape=(14, 14))
+
+        assert captured["variant_name"] == "rfdetr-medium"
+
+    def test_rfdetr_export_passes_none_when_size_not_set(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Base RFDETR (size=None) passes None as variant_name."""
+        captured: dict = {}
+
+        model = types.SimpleNamespace(
+            model=types.SimpleNamespace(model=_DummyCoreModel(), device="cpu", resolution=14),
+            model_config=types.SimpleNamespace(segmentation_head=False, num_channels=3),
+            size=None,
+        )
+
+        def _fake_make_infer_image(*_args, **_kwargs):
+            return torch.zeros(1, 3, 14, 14)
+
+        def _fake_export_onnx(*_args, variant_name=None, **_kw):
+            captured["variant_name"] = variant_name
+            return str(tmp_path / "inference_model.onnx")
+
+        monkeypatch.setattr("rfdetr.export.main.make_infer_image", _fake_make_infer_image)
+        monkeypatch.setattr("rfdetr.export.main.export_onnx", _fake_export_onnx)
+        monkeypatch.setattr("rfdetr.detr.deepcopy", lambda x: x)
+
+        _detr_module.RFDETR.export(model, output_dir=str(tmp_path), shape=(14, 14))
+
+        assert captured["variant_name"] is None
+
+    @pytest.mark.parametrize(
+        "variant_name, expected_suffix",
+        [
+            pytest.param("", "inference_model.onnx", id="empty_string_falls_back_to_default"),
+            pytest.param("foo/bar", "bar.onnx", id="path_separator_stripped_to_basename"),
+            pytest.param("/tmp/x", "x.onnx", id="absolute_path_stripped_to_basename"),
+        ],
+    )
+    def test_variant_name_sanitization(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        variant_name: str,
+        expected_suffix: str,
+    ) -> None:
+        """variant_name edge cases: empty string falls back to default; path separators are stripped."""
+        captured: dict = {}
+
+        def _fake_onnx_export(*args, **kwargs) -> None:
+            captured["output_file"] = args[2]
+
+        monkeypatch.setattr(_cli_export_module.torch.onnx, "export", _fake_onnx_export)
+
+        _cli_export_module.export_onnx(
+            output_dir=str(tmp_path),
+            model=torch.nn.Identity(),
+            input_names=["input"],
+            input_tensors=torch.randn(1, 3, 8, 8),
+            output_names=["dets"],
+            dynamic_axes=None,
+            verbose=False,
+            variant_name=variant_name or None,
+        )
+
+        assert captured["output_file"].endswith(expected_suffix)
